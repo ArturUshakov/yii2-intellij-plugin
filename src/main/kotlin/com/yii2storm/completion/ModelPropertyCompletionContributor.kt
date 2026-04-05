@@ -54,8 +54,11 @@ class ModelPropertyCompletionContributor : CompletionContributor() {
     private fun kindLabel(kind: PropertyKind): String = when (kind) {
         PropertyKind.RELATION -> "[relation]"
         PropertyKind.GETTER -> "[getter]"
+        PropertyKind.SETTER -> "[setter]"
         PropertyKind.FIELD -> "[field]"
         PropertyKind.PHPDOC -> "[phpdoc]"
+        PropertyKind.PHPDOC_READ -> "[phpdoc-read]"
+        PropertyKind.PHPDOC_WRITE -> "[phpdoc-write]"
         PropertyKind.ATTRIBUTE -> "[attribute]"
     }
 }

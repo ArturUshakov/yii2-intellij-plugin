@@ -21,15 +21,26 @@ class ModelPropertyResolver private constructor() {
             "@property(?:-read|-write)?\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)"
         )
 
-        private const val RELATION_METHOD_PREFIX = "get"
+        private val PHP_DOC_PROPERTY_READ_REGEX = Regex(
+            "@property-read\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)"
+        )
+
+        private val PHP_DOC_PROPERTY_WRITE_REGEX = Regex(
+            "@property-write\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)"
+        )
+
+        private const val GETTER_PREFIX = "get"
+        private const val SETTER_PREFIX = "set"
 
         fun getInstance(project: Project): ModelPropertyResolver = INSTANCE
     }
 
     /**
      * Get all magic properties for a model class, collected from the entire hierarchy.
-     * Relations override getters and plain properties with the same name.
-     * Order: FIELD < PHPDOC < GETTER < RELATION < ATTRIBUTE
+     * Priority order (lowest to highest):
+     * FIELD < PHPDOC < GETTER < SETTER < RELATION < ATTRIBUTE
+     *
+     * Relations and attributes override everything, setters override getters for the same property name.
      */
     fun getModelProperties(phpClass: PhpClass): List<ModelProperty> {
         if (!isModelClass(phpClass)) {
@@ -81,7 +92,12 @@ class ModelPropertyResolver private constructor() {
         // Lower-priority sources first (putIfAbsent = first wins)
         getPublicProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
         getPhpDocProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
+        
+        // Getters - only public methods that are NOT relations
         getGetterProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
+        
+        // Setters override getters (if both exist for same property)
+        getSetterProperties(phpClass).forEach { properties[it.name] = it }
 
         // Higher-priority sources override (direct put)
         getRelationProperties(phpClass).forEach { properties[it.name] = it }
@@ -121,38 +137,106 @@ class ModelPropertyResolver private constructor() {
         val docComment = phpClass.docComment ?: return emptyList()
         val docText = docComment.text
 
-        return PHP_DOC_PROPERTY_REGEX.findAll(docText)
-            .mapNotNull { match ->
+        return buildList {
+            // Regular @property declarations
+            PHP_DOC_PROPERTY_REGEX.findAll(docText).forEach { match ->
                 val rawType = match.groupValues[1].trim()
                 val propertyName = match.groupValues[2].trim()
-                if (propertyName.isBlank()) null
-                else ModelProperty(
-                    name = propertyName,
-                    type = buildPhpType(rawType),
-                    kind = PropertyKind.PHPDOC,
-                    source = docComment
-                )
+                if (propertyName.isNotBlank()) {
+                    add(
+                        ModelProperty(
+                            name = propertyName,
+                            type = buildPhpType(rawType),
+                            kind = PropertyKind.PHPDOC,
+                            source = docComment
+                        )
+                    )
+                }
             }
-            .toList()
+
+            // @property-read declarations (read-only)
+            PHP_DOC_PROPERTY_READ_REGEX.findAll(docText).forEach { match ->
+                val rawType = match.groupValues[1].trim()
+                val propertyName = match.groupValues[2].trim()
+                if (propertyName.isNotBlank()) {
+                    add(
+                        ModelProperty(
+                            name = propertyName,
+                            type = buildPhpType(rawType),
+                            kind = PropertyKind.PHPDOC_READ,
+                            source = docComment
+                        )
+                    )
+                }
+            }
+
+            // @property-write declarations (write-only)
+            PHP_DOC_PROPERTY_WRITE_REGEX.findAll(docText).forEach { match ->
+                val rawType = match.groupValues[1].trim()
+                val propertyName = match.groupValues[2].trim()
+                if (propertyName.isNotBlank()) {
+                    add(
+                        ModelProperty(
+                            name = propertyName,
+                            type = buildPhpType(rawType),
+                            kind = PropertyKind.PHPDOC_WRITE,
+                            source = docComment
+                        )
+                    )
+                }
+            }
+        }
     }
 
     /**
      * Find all public getX() methods that are NOT relation methods.
+     * These define readable magic properties.
+     * 
+     * Examples:
+     *   getDirection_id() -> property "direction_id"
+     *   getFullName() -> property "fullName"
      */
     private fun getGetterProperties(phpClass: PhpClass): List<ModelProperty> {
         return phpClass.methods
             .filter { method ->
                 isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith(RELATION_METHOD_PREFIX) &&
-                    method.name.length > RELATION_METHOD_PREFIX.length &&
+                    method.name.startsWith(GETTER_PREFIX) &&
+                    method.name.length > GETTER_PREFIX.length &&
                     !isRelationMethod(method)
             }
             .map { method ->
                 ModelProperty(
-                    name = toPropertyName(method.name),
+                    name = getterToPropertyName(method.name),
                     type = method.type,
                     kind = PropertyKind.GETTER,
+                    source = method
+                )
+            }
+    }
+
+    /**
+     * Find all public setX() methods.
+     * These define writable magic properties.
+     * 
+     * Examples:
+     *   setDirection_id($value) -> property "direction_id"
+     *   setFullName($value) -> property "fullName"
+     */
+    private fun getSetterProperties(phpClass: PhpClass): List<ModelProperty> {
+        return phpClass.methods
+            .filter { method ->
+                isPublic(method) &&
+                    method.name.startsWith(SETTER_PREFIX) &&
+                    method.name.length > SETTER_PREFIX.length &&
+                    method.parameters.isNotEmpty() &&
+                    !isRelationMethod(method)
+            }
+            .map { method ->
+                ModelProperty(
+                    name = setterToPropertyName(method.name),
+                    type = getSetterParameterType(method),
+                    kind = PropertyKind.SETTER,
                     source = method
                 )
             }
@@ -167,13 +251,13 @@ class ModelPropertyResolver private constructor() {
             .filter { method ->
                 isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith(RELATION_METHOD_PREFIX) &&
-                    method.name.length > RELATION_METHOD_PREFIX.length &&
+                    method.name.startsWith(GETTER_PREFIX) &&
+                    method.name.length > GETTER_PREFIX.length &&
                     isRelationMethod(method)
             }
             .map { method ->
                 ModelProperty(
-                    name = toPropertyName(method.name),
+                    name = getterToPropertyName(method.name),
                     type = extractRelationType(method),
                     kind = PropertyKind.RELATION,
                     source = method
@@ -183,6 +267,7 @@ class ModelPropertyResolver private constructor() {
 
     /**
      * Parse the attributes() method to find additional property names.
+     * These represent database columns that Yii2 ActiveRecord automatically exposes.
      */
     private fun getAttributesMethodProperties(phpClass: PhpClass): List<ModelProperty> {
         val attributesMethod = phpClass.methods.firstOrNull { method ->
@@ -210,7 +295,7 @@ class ModelPropertyResolver private constructor() {
 
     /**
      * Detect if a method is a Yii2 relation by checking for hasOne/hasMany calls.
-     * Uses text-based detection on the method body since we need to parse PHP code structure.
+     * Uses text-based detection on the method body.
      */
     private fun isRelationMethod(method: Method): Boolean {
         val text = method.text
@@ -237,11 +322,50 @@ class ModelPropertyResolver private constructor() {
         return method.type
     }
 
+    /**
+     * Extract parameter type from setter method for better type inference.
+     * For setDirection_id($value), tries to find type hint or PHPDoc @param.
+     */
+    private fun getSetterParameterType(method: Method): PhpType? {
+        val firstParam = method.parameters.firstOrNull() ?: return null
+
+        // Try to get type hint from parameter
+        val typeHint = firstParam.declaredType
+        if (typeHint.isEmpty.not()) {
+            return typeHint
+        }
+
+        // Try to extract from @param in doc comment
+        val docComment = method.docComment?.text ?: return null
+        val paramPattern = Regex("@param\\s+([^\\s]+)")
+        paramPattern.find(docComment)?.let { match ->
+            return buildPhpType(match.groupValues[1].trim())
+        }
+
+        return null
+    }
+
     // --- Helpers ---
 
-    private fun toPropertyName(getterName: String): String {
-        val base = getterName.removePrefix(RELATION_METHOD_PREFIX)
+    /**
+     * Convert getter method name to property name.
+     * getDirection_id -> direction_id
+     * getFullName -> fullName
+     */
+    private fun getterToPropertyName(getterName: String): String {
+        val base = getterName.removePrefix(GETTER_PREFIX)
         if (base.isEmpty()) return getterName
+        return base.replaceFirstChar { it.lowercaseChar() }
+    }
+
+    /**
+     * Convert setter method name to property name.
+     * setDirection_id -> direction_id
+     * setFullName -> fullName
+     */
+    private fun setterToPropertyName(setterName: String): String {
+        val base = setterName.removePrefix(SETTER_PREFIX)
+        if (base.isEmpty()) return setterName
         return base.replaceFirstChar { it.lowercaseChar() }
     }
 
@@ -277,9 +401,12 @@ data class ModelProperty(
 )
 
 enum class PropertyKind {
-    FIELD,
-    PHPDOC,
-    GETTER,
-    RELATION,
-    ATTRIBUTE
+    FIELD,              // Public field declaration
+    PHPDOC,             // @property in PHPDoc
+    PHPDOC_READ,        // @property-read in PHPDoc
+    PHPDOC_WRITE,       // @property-write in PHPDoc
+    GETTER,             // getX() method
+    SETTER,             // setX() method
+    RELATION,           // getX() with hasOne/hasMany
+    ATTRIBUTE           // Database column from attributes()
 }

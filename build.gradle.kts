@@ -45,6 +45,10 @@ tasks {
         enabled = false
     }
 
+    prepareJarSearchableOptions {
+        enabled = false
+    }
+
     runIde {
         jvmArgs = listOf("-Xmx2048m")
     }

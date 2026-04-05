@@ -35,7 +35,8 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
             return null
         }
 
-        val targets = linkedSetOf<PsiElement>()
+        // Collect ALL possible targets with their priority scores
+        val targetsWithPriority = mutableListOf<Pair<PsiElement, Int>>()
 
         modelClasses.forEach { phpClass ->
             resolver.getModelProperties(phpClass)
@@ -43,20 +44,52 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
                 .forEach { property ->
                     val target = resolvePropertyTarget(phpClass, property, propertyName)
                     if (target != null) {
-                        targets.add(target)
+                        val priority = getPriorityForKind(property.kind)
+                        targetsWithPriority.add(target to priority)
                     }
                 }
         }
 
-        return targets.takeIf { it.isNotEmpty() }?.toTypedArray()
+        if (targetsWithPriority.isEmpty()) {
+            return null
+        }
+
+        // Sort by priority (highest first) and return unique elements
+        val sortedTargets = targetsWithPriority
+            .sortedByDescending { it.second }
+            .map { it.first }
+            .distinct()
+            .toTypedArray()
+
+        return sortedTargets.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Get priority score for property kind.
+     * Higher score = more important = appears first in navigation list.
+     */
+    private fun getPriorityForKind(kind: PropertyKind): Int {
+        return when (kind) {
+            PropertyKind.RELATION -> 100     // Highest priority
+            PropertyKind.GETTER -> 90
+            PropertyKind.SETTER -> 85
+            PropertyKind.ATTRIBUTE -> 80
+            PropertyKind.FIELD -> 70
+            PropertyKind.PHPDOC -> 50
+            PropertyKind.PHPDOC_READ -> 40
+            PropertyKind.PHPDOC_WRITE -> 30
+        }
     }
 
     /**
      * Resolve to the most meaningful PSI element for the property:
      * - RELATION: the getter method that defines the relation
      * - GETTER: the getter method
+     * - SETTER: the setter method
      * - FIELD: the field declaration itself
      * - PHPDOC: the @property line in the doc comment of the class that declares it
+     * - PHPDOC_READ: the @property-read line in the doc comment
+     * - PHPDOC_WRITE: the @property-write line in the doc comment
      * - ATTRIBUTE: the attributes() method
      */
     private fun resolvePropertyTarget(
@@ -67,8 +100,11 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
         return when (property.kind) {
             PropertyKind.RELATION -> findMethodInHierarchy(phpClass, getterMethodName(propertyName))
             PropertyKind.GETTER -> findMethodInHierarchy(phpClass, getterMethodName(propertyName))
+            PropertyKind.SETTER -> findMethodInHierarchy(phpClass, setterMethodName(propertyName))
             PropertyKind.FIELD -> findFieldInHierarchy(phpClass, propertyName)
             PropertyKind.PHPDOC -> findDocCommentWithProperty(phpClass, propertyName)
+            PropertyKind.PHPDOC_READ -> findDocCommentWithPropertyRead(phpClass, propertyName, "@property-read")
+            PropertyKind.PHPDOC_WRITE -> findDocCommentWithPropertyRead(phpClass, propertyName, "@property-write")
             PropertyKind.ATTRIBUTE -> findMethodInHierarchy(phpClass, "attributes")
         }
     }
@@ -111,6 +147,31 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
 
     private fun getterMethodName(propertyName: String): String {
         return "get" + propertyName.replaceFirstChar { it.uppercaseChar() }
+    }
+
+    private fun setterMethodName(propertyName: String): String {
+        return "set" + propertyName.replaceFirstChar { it.uppercaseChar() }
+    }
+
+    /**
+     * Find the doc comment that contains @property-read or @property-write declaration.
+     */
+    private fun findDocCommentWithPropertyRead(
+        phpClass: PhpClass,
+        propertyName: String,
+        annotationName: String
+    ): PsiElement? {
+        var current: PhpClass? = phpClass
+        while (current != null) {
+            val docComment = current.docComment
+            if (docComment != null && 
+                docComment.text.contains(annotationName) && 
+                docComment.text.contains("\$${propertyName}")) {
+                return docComment
+            }
+            current = current.superClass
+        }
+        return null
     }
 
     override fun getActionText(context: DataContext): String? = null
