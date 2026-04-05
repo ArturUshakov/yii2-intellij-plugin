@@ -100,24 +100,6 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
     ): List<Triple<PsiElement, Int, String>> {
         val results = mutableListOf<Triple<PsiElement, Int, String>>()
 
-        // Check PHPDoc @property
-        val phpDocProp = findPhpDocProperty(phpClass, propertyName, "@property")
-        if (phpDocProp != null) {
-            results.add(Triple(phpDocProp, getPriorityForKind(PropertyKind.PHPDOC), "@property"))
-        }
-
-        // Check PHPDoc @property-read
-        val phpDocPropRead = findPhpDocProperty(phpClass, propertyName, "@property-read")
-        if (phpDocPropRead != null) {
-            results.add(Triple(phpDocPropRead, getPriorityForKind(PropertyKind.PHPDOC_READ), "@property-read"))
-        }
-
-        // Check PHPDoc @property-write
-        val phpDocPropWrite = findPhpDocProperty(phpClass, propertyName, "@property-write")
-        if (phpDocPropWrite != null) {
-            results.add(Triple(phpDocPropWrite, getPriorityForKind(PropertyKind.PHPDOC_WRITE), "@property-write"))
-        }
-
         // Check public field
         val field = findFieldInHierarchy(phpClass, propertyName)
         if (field != null) {
@@ -132,7 +114,7 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
             val isRelation = containsRelationCall(getter)
             val kind = if (isRelation) PropertyKind.RELATION else PropertyKind.GETTER
             val label = if (isRelation) "Relation" else "Getter"
-            
+
             results.add(Triple(getter, getPriorityForKind(kind), label))
         }
 
@@ -150,6 +132,28 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
             val attributesContent = attributesMethod.text
             if (attributesContent.contains("'$propertyName'") || attributesContent.contains("\"$propertyName\"")) {
                 results.add(Triple(attributesMethod, getPriorityForKind(PropertyKind.ATTRIBUTE), "Attributes"))
+            }
+        }
+
+        // Only add PHPDoc if no other code targets were found
+        // This prevents showing the full PHPDoc comment when there's already a getter/setter/field
+        if (results.isEmpty()) {
+            // Check PHPDoc @property
+            val phpDocProp = findPhpDocProperty(phpClass, propertyName, "@property")
+            if (phpDocProp != null) {
+                results.add(Triple(phpDocProp, getPriorityForKind(PropertyKind.PHPDOC), "@property"))
+            }
+
+            // Check PHPDoc @property-read
+            val phpDocPropRead = findPhpDocProperty(phpClass, propertyName, "@property-read")
+            if (phpDocPropRead != null) {
+                results.add(Triple(phpDocPropRead, getPriorityForKind(PropertyKind.PHPDOC_READ), "@property-read"))
+            }
+
+            // Check PHPDoc @property-write
+            val phpDocPropWrite = findPhpDocProperty(phpClass, propertyName, "@property-write")
+            if (phpDocPropWrite != null) {
+                results.add(Triple(phpDocPropWrite, getPriorityForKind(PropertyKind.PHPDOC_WRITE), "@property-write"))
             }
         }
 

@@ -12,7 +12,7 @@ import com.yii2storm.modelmagic.resolver.PropertyKind
 import com.yii2storm.modelmagic.util.MagicPropertyPsiUtil
 
 /**
- * Annotates Yii2 model magic properties with a distinct text color.
+ * Annotates Yii2 model magic properties.
  * Only annotates properties that have a getter, setter, relation, or attribute
  * (excludes plain PHPDoc-only properties).
  */
@@ -50,7 +50,6 @@ class MagicPropertyAnnotator : Annotator {
 
         if (hasMagicProperty) {
             holder.newSilentAnnotation(HighlightSeverity.INFORMATION)
-                .textAttributes(MagicPropertyTextAttributes.KEY)
                 .create()
         }
     }
