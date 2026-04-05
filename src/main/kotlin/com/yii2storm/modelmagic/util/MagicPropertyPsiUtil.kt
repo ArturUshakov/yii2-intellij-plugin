@@ -1,4 +1,4 @@
-package com.yii2storm.util
+package com.yii2storm.modelmagic.util
 
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
@@ -7,32 +7,21 @@ import com.jetbrains.php.lang.lexer.PhpTokenTypes
 import com.jetbrains.php.lang.psi.elements.FieldReference
 import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.jetbrains.php.lang.psi.resolve.types.PhpType
-import com.yii2storm.resolver.ModelPropertyResolver
+import com.yii2storm.modelmagic.resolver.MagicPropertyResolver
 
-object ModelPropertyPsiUtil {
+object MagicPropertyPsiUtil {
 
     /**
      * Resolve all model classes from a field reference expression.
-     * Returns only PhpClass instances that extend yii\db\ActiveRecord or yii\base\Model.
      */
     fun resolveModelClasses(project: Project, fieldReference: FieldReference): List<PhpClass> {
         val classReference = fieldReference.classReference ?: return emptyList()
-        val phpIndex = PhpIndex.getInstance(project)
-        val resolver = ModelPropertyResolver.getInstance(project)
-
-        val candidateTypes = resolveTypeNames(classReference.type, phpIndex, project) +
-                resolveTypeNames(classReference.globalType, phpIndex, project)
-
-        return candidateTypes
-            .distinct()
-            .mapNotNull { fqn -> phpIndex.getClassesByFQN(fqn).firstOrNull() }
-            .filter { phpClass -> resolver.isModelClass(phpClass) }
-            .distinctBy { it.fqn }
+        return resolveClassesFromType(classReference.type, project) +
+                resolveClassesFromType(classReference.globalType, project)
     }
 
     /**
      * Check if the element is exactly the property name part of a field reference.
-     * Used to avoid triggering on arrow operator or other parts of the expression.
      */
     fun isOnPropertyName(element: PsiElement, fieldReference: FieldReference): Boolean {
         val propertyName = fieldReference.name ?: return false
@@ -41,10 +30,7 @@ object ModelPropertyPsiUtil {
     }
 
     /**
-     * Extract FQN type names from a PhpType, filtering out:
-     * - pseudo-types starting with #
-     * - blank strings
-     * - non-FQN strings (not starting with \)
+     * Extract FQN type names from a PhpType.
      */
     private fun resolveTypeNames(type: PhpType?, phpIndex: PhpIndex, project: Project): List<String> {
         if (type == null || type.isEmpty) return emptyList()
@@ -56,5 +42,23 @@ object ModelPropertyPsiUtil {
                         !typeName.startsWith("#") &&
                         typeName.startsWith("\\")
             }
+    }
+
+    /**
+     * Resolve classes from a PhpType, filtering to only model classes.
+     */
+    private fun resolveClassesFromType(type: PhpType?, project: Project): List<PhpClass> {
+        if (type == null || type.isEmpty) return emptyList()
+
+        val phpIndex = PhpIndex.getInstance(project)
+        val resolver = MagicPropertyResolver.getInstance(project)
+
+        val candidateTypes = resolveTypeNames(type, phpIndex, project)
+
+        return candidateTypes
+            .distinct()
+            .mapNotNull { fqn -> phpIndex.getClassesByFQN(fqn).firstOrNull() }
+            .filter { phpClass -> resolver.isModelClass(phpClass) }
+            .distinctBy { it.fqn }
     }
 }

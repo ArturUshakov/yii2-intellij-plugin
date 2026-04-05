@@ -1,25 +1,23 @@
-package com.yii2storm.type
+package com.yii2storm.modelmagic.type
 
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
 import com.jetbrains.php.PhpIndex
+import com.jetbrains.php.lang.psi.elements.ArrayAccessExpression
 import com.jetbrains.php.lang.psi.elements.FieldReference
 import com.jetbrains.php.lang.psi.elements.PhpNamedElement
 import com.jetbrains.php.lang.psi.resolve.types.PhpType
 import com.jetbrains.php.lang.psi.resolve.types.PhpTypeProvider4
-import com.yii2storm.resolver.ModelPropertyResolver
-import com.yii2storm.util.ModelPropertyPsiUtil
+import com.yii2storm.modelmagic.resolver.MagicPropertyResolver
+import com.yii2storm.modelmagic.util.MagicPropertyPsiUtil
 
 /**
  * Provides type inference for magic model properties.
  * Uses the signature-based caching mechanism of PhpTypeProvider4.
- *
- * The flow:
- * 1. getType() is called first — returns a signature string with our key
- * 2. complete() is called later — resolves the signature back to actual types
- * 3. getBySignature() is the fallback for signature resolution
+ * 
+ * Supports both primitive types (string, int, bool) and class types.
  */
-class ModelPropertyTypeProvider : PhpTypeProvider4 {
+class MagicPropertyTypeProvider : PhpTypeProvider4 {
 
     override fun getKey(): Char = KEY
 
@@ -27,8 +25,8 @@ class ModelPropertyTypeProvider : PhpTypeProvider4 {
         val fieldReference = psiElement as? FieldReference ?: return null
         val propertyName = fieldReference.name ?: return null
         val project = psiElement.project
-        val resolver = ModelPropertyResolver.getInstance(project)
-        val modelClasses = ModelPropertyPsiUtil.resolveModelClasses(project, fieldReference)
+        val resolver = MagicPropertyResolver.getInstance(project)
+        val modelClasses = MagicPropertyPsiUtil.resolveModelClasses(project, fieldReference)
 
         if (modelClasses.isEmpty()) return null
 
@@ -51,12 +49,15 @@ class ModelPropertyTypeProvider : PhpTypeProvider4 {
         // This is called to resolve our signature back to actual types
         val types = expression.split("|")
             .map { it.trim() }
-            .filter { it.isNotBlank() && it.startsWith("\\") }
+            .filter { it.isNotBlank() }
 
         if (types.isEmpty()) return null
 
         val resultType = PhpType()
-        types.forEach { resultType.add(it) }
+        types.forEach { typeStr ->
+            // Keep both class types (starting with \) and primitive types
+            resultType.add(typeStr)
+        }
         return resultType
     }
 

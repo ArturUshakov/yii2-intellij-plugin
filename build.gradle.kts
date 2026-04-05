@@ -21,6 +21,11 @@ dependencies {
         phpstorm("2026.1")
         bundledPlugin("com.jetbrains.php")
     }
+    
+    // Test dependencies - use IntelliJ Platform test framework
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.0")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.0")
+    testImplementation("org.junit.platform:junit-platform-launcher:1.10.0")
 }
 
 java {
@@ -37,8 +42,8 @@ kotlin {
 
 tasks {
     patchPluginXml {
-        sinceBuild.set("261")
-        untilBuild.set("261.*")
+        sinceBuild.set("241")  // PhpStorm 2024.1+
+        untilBuild.set("")     // No upper limit
     }
 
     buildSearchableOptions {
@@ -51,5 +56,9 @@ tasks {
 
     runIde {
         jvmArgs = listOf("-Xmx2048m")
+    }
+
+    test {
+        useJUnitPlatform()
     }
 }
