@@ -1,0 +1,44 @@
+<idea-plugin>
+    <id>com.yii2storm.plugin</id>
+    <name>Yii2Storm</name>
+    <version>1.0.0</version>
+    <vendor email="support@yii2storm.local">yii2storm</vendor>
+
+    <description><![CDATA[
+        <p>Плагин для PhpStorm с поддержкой магических свойств моделей Yii2.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.jetbrains.php</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+
+        <!-- Completion -->
+        <completion.contributor
+                language="PHP"
+                implementationClass="com.yii2storm.completion.ModelPropertyCompletionContributor"/>
+
+        <!-- References -->
+        <psi.referenceContributor
+                language="PHP"
+                implementation="com.yii2storm.reference.ModelPropertyReferenceContributor"/>
+
+        <!-- Inspection -->
+        <localInspection
+                language="PHP"
+                shortName="Yii2UnknownModelProperty"
+                displayName="Unknown Yii2 model magic property"
+                groupName="Yii2"
+                enabledByDefault="true"
+                implementationClass="com.yii2storm.inspection.ModelPropertyInspection"/>
+
+        <!-- Type -->
+        <php.typeProvider4
+                implementation="com.yii2storm.type.ModelPropertyTypeProvider"/>
+
+        <!-- Navigation / Go to Declaration -->
+        <gotoDeclarationHandler
+                implementation="com.yii2storm.navigation.ModelPropertyGotoDeclarationHandler"/>
+
+    </extensions>
+</idea-plugin>
