@@ -3,17 +3,20 @@ package com.yii2storm.modelmagic.navigation
 import com.intellij.codeInsight.navigation.actions.GotoDeclarationHandler
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.parentOfType
 import com.jetbrains.php.lang.psi.elements.Field
 import com.jetbrains.php.lang.psi.elements.FieldReference
 import com.jetbrains.php.lang.psi.elements.Method
 import com.jetbrains.php.lang.psi.elements.PhpClass
-import com.yii2storm.modelmagic.resolver.MagicProperty
-import com.yii2storm.modelmagic.resolver.MagicPropertyResolver
 import com.yii2storm.modelmagic.resolver.PropertyKind
 
 class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
+
+    companion object {
+        private val LOG = Logger.getInstance(MagicPropertyGotoDeclarationHandler::class.java)
+    }
 
     override fun getGotoDeclarationTargets(
         sourceElement: PsiElement?,
@@ -38,36 +41,36 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
             return null
         }
 
-        val resolver = MagicPropertyResolver.getInstance(element.project)
         val modelClasses = com.yii2storm.modelmagic.util.MagicPropertyPsiUtil.resolveModelClasses(element.project, fieldReference)
         if (modelClasses.isEmpty()) {
             return null
         }
 
-        return collectTargets(resolver, modelClasses, propertyName)
+        val targets = collectTargets(modelClasses, propertyName)
+        
+        // Return null if no targets found (let other handlers take over)
+        // Return array with elements if targets found - IDE will show choice popup
+        return targets?.takeIf { it.isNotEmpty() }
     }
 
     private fun collectTargets(
-        resolver: MagicPropertyResolver,
         modelClasses: List<PhpClass>,
         propertyName: String
     ): Array<PsiElement>? {
-        // Collect ALL possible targets with their priority scores
+        // Collect ALL possible targets from all model classes
         val targetsWithPriority = mutableListOf<Triple<PsiElement, Int, String>>()
 
         modelClasses.forEach { phpClass ->
-            resolver.getModelProperties(phpClass)
-                .filter { it.name == propertyName }
-                .forEach { property ->
-                    val targets = resolvePropertyTargets(phpClass, property, propertyName)
-                    targets.forEach { (target, label) ->
-                        val priority = getPriorityForKind(property.kind)
-                        targetsWithPriority.add(Triple(target, priority, label))
-                    }
-                }
+            // Get all properties, but we need to collect ALL sources, not just the highest priority one
+            val allProperties = collectAllPropertySources(phpClass, propertyName)
+            
+            allProperties.forEach { (psiElement, priority, label) ->
+                targetsWithPriority.add(Triple(psiElement, priority, label))
+            }
         }
 
         if (targetsWithPriority.isEmpty()) {
+            LOG.debug("No targets found for property: $propertyName")
             return null
         }
 
@@ -75,10 +78,125 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
         val sortedTargets = targetsWithPriority
             .sortedByDescending { it.second }
             .map { it.first }
-            .distinct()
+            .fold(LinkedHashSet<PsiElement>()) { acc, element ->
+                if (!acc.contains(element)) {
+                    acc.add(element)
+                }
+                acc
+            }
             .toTypedArray()
 
+        LOG.debug("Returning ${sortedTargets.size} unique targets for: $propertyName")
         return sortedTargets.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Collect ALL sources for a property (PHPDoc, getter, setter, relation, etc.)
+     * Returns list of (PsiElement, priority, label)
+     */
+    private fun collectAllPropertySources(
+        phpClass: PhpClass,
+        propertyName: String
+    ): List<Triple<PsiElement, Int, String>> {
+        val results = mutableListOf<Triple<PsiElement, Int, String>>()
+
+        // Check PHPDoc @property
+        val phpDocProp = findPhpDocProperty(phpClass, propertyName, "@property")
+        if (phpDocProp != null) {
+            results.add(Triple(phpDocProp, getPriorityForKind(PropertyKind.PHPDOC), "@property"))
+        }
+
+        // Check PHPDoc @property-read
+        val phpDocPropRead = findPhpDocProperty(phpClass, propertyName, "@property-read")
+        if (phpDocPropRead != null) {
+            results.add(Triple(phpDocPropRead, getPriorityForKind(PropertyKind.PHPDOC_READ), "@property-read"))
+        }
+
+        // Check PHPDoc @property-write
+        val phpDocPropWrite = findPhpDocProperty(phpClass, propertyName, "@property-write")
+        if (phpDocPropWrite != null) {
+            results.add(Triple(phpDocPropWrite, getPriorityForKind(PropertyKind.PHPDOC_WRITE), "@property-write"))
+        }
+
+        // Check public field
+        val field = findFieldInHierarchy(phpClass, propertyName)
+        if (field != null) {
+            results.add(Triple(field, getPriorityForKind(PropertyKind.FIELD), "Field"))
+        }
+
+        // Check getter (might be relation or regular getter)
+        val getterName = getterMethodName(propertyName)
+        val getter = findMethodInHierarchy(phpClass, getterName)
+        if (getter != null) {
+            // Check if it's a relation by looking for hasOne/hasMany in the method body
+            val isRelation = containsRelationCall(getter)
+            val kind = if (isRelation) PropertyKind.RELATION else PropertyKind.GETTER
+            val label = if (isRelation) "Relation" else "Getter"
+            
+            results.add(Triple(getter, getPriorityForKind(kind), label))
+        }
+
+        // Check setter
+        val setterName = setterMethodName(propertyName)
+        val setter = findMethodInHierarchy(phpClass, setterName)
+        if (setter != null) {
+            results.add(Triple(setter, getPriorityForKind(PropertyKind.SETTER), "Setter"))
+        }
+
+        // Check attributes() method
+        val attributesMethod = findMethodInHierarchy(phpClass, "attributes")
+        if (attributesMethod != null) {
+            // Check if property name is in attributes() return
+            val attributesContent = attributesMethod.text
+            if (attributesContent.contains("'$propertyName'") || attributesContent.contains("\"$propertyName\"")) {
+                results.add(Triple(attributesMethod, getPriorityForKind(PropertyKind.ATTRIBUTE), "Attributes"))
+            }
+        }
+
+        return results
+    }
+
+    /**
+     * Check if a method contains hasOne/hasMany call (Yii2 relation).
+     */
+    private fun containsRelationCall(method: Method): Boolean {
+        var found = false
+        method.accept(object : com.intellij.psi.PsiRecursiveElementVisitor() {
+            override fun visitElement(element: PsiElement) {
+                if (found) return
+                if (element is com.jetbrains.php.lang.psi.elements.PhpReference) {
+                    val name = element.name
+                    if (name == "hasOne" || name == "hasMany") {
+                        found = true
+                        return
+                    }
+                }
+                super.visitElement(element)
+            }
+        })
+        return found
+    }
+
+    /**
+     * Find PHPDoc @property annotation and return the doc comment PsiElement.
+     */
+    private fun findPhpDocProperty(
+        phpClass: PhpClass,
+        propertyName: String,
+        annotationName: String
+    ): PsiElement? {
+        var current: PhpClass? = phpClass
+        while (current != null) {
+            val docComment = current.docComment
+            if (docComment != null) {
+                val regex = Regex("$annotationName\\s+\\S+\\s+\\$${Regex.escape(propertyName)}")
+                if (regex.containsMatchIn(docComment.text)) {
+                    return docComment
+                }
+            }
+            current = current.superClass
+        }
+        return null
     }
 
     /**
@@ -95,51 +213,6 @@ class MagicPropertyGotoDeclarationHandler : GotoDeclarationHandler {
             PropertyKind.PHPDOC -> 50
             PropertyKind.PHPDOC_READ -> 40
             PropertyKind.PHPDOC_WRITE -> 30
-        }
-    }
-
-    /**
-     * Resolve to ALL meaningful PSI elements for the property.
-     * Returns list of (target, label) pairs.
-     */
-    private fun resolvePropertyTargets(
-        phpClass: PhpClass,
-        property: MagicProperty,
-        propertyName: String
-    ): List<Pair<PsiElement, String>> {
-        return when (property.kind) {
-            PropertyKind.RELATION -> {
-                val method = findMethodInHierarchy(phpClass, getterMethodName(propertyName))
-                if (method != null) listOf(method to "Relation") else emptyList()
-            }
-            PropertyKind.GETTER -> {
-                val method = findMethodInHierarchy(phpClass, getterMethodName(propertyName))
-                if (method != null) listOf(method to "Getter") else emptyList()
-            }
-            PropertyKind.SETTER -> {
-                val method = findMethodInHierarchy(phpClass, setterMethodName(propertyName))
-                if (method != null) listOf(method to "Setter") else emptyList()
-            }
-            PropertyKind.FIELD -> {
-                val field = findFieldInHierarchy(phpClass, propertyName)
-                if (field != null) listOf(field to "Field") else emptyList()
-            }
-            PropertyKind.PHPDOC -> {
-                val docComment = findDocCommentWithProperty(phpClass, propertyName)
-                if (docComment != null) listOf(docComment to "@property") else emptyList()
-            }
-            PropertyKind.PHPDOC_READ -> {
-                val docComment = findDocCommentWithPropertyAnnotation(phpClass, propertyName, "@property-read")
-                if (docComment != null) listOf(docComment to "@property-read") else emptyList()
-            }
-            PropertyKind.PHPDOC_WRITE -> {
-                val docComment = findDocCommentWithPropertyAnnotation(phpClass, propertyName, "@property-write")
-                if (docComment != null) listOf(docComment to "@property-write") else emptyList()
-            }
-            PropertyKind.ATTRIBUTE -> {
-                val method = findMethodInHierarchy(phpClass, "attributes")
-                if (method != null) listOf(method to "Attributes") else emptyList()
-            }
         }
     }
 

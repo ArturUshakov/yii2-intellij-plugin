@@ -54,6 +54,11 @@
 
     <extensions defaultExtensionNs="com.intellij">
 
+        <!-- Annotator -->
+        <annotator
+                language="PHP"
+                implementationClass="com.yii2storm.modelmagic.annotator.MagicPropertyAnnotator"/>
+
         <!-- Completion -->
         <completion.contributor
                 language="PHP"
