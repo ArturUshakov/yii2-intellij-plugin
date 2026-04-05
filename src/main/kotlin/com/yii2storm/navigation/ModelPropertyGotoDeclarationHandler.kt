@@ -24,7 +24,7 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
         val fieldReference = element.parentOfType<FieldReference>(withSelf = true) ?: return null
         val propertyName = fieldReference.name ?: return null
 
-        // Verify the element is the property name itself (not the arrow or other part)
+        // Only trigger when cursor is on the property name itself
         if (element.text != propertyName) {
             return null
         }
@@ -38,15 +38,14 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
         val targets = linkedSetOf<PsiElement>()
 
         modelClasses.forEach { phpClass ->
-            val properties = resolver.getModelProperties(phpClass)
+            resolver.getModelProperties(phpClass)
                 .filter { it.name == propertyName }
-
-            properties.forEach { property ->
-                val target = resolvePropertyTarget(phpClass, property)
-                if (target != null) {
-                    targets.add(target)
+                .forEach { property ->
+                    val target = resolvePropertyTarget(phpClass, property, propertyName)
+                    if (target != null) {
+                        targets.add(target)
+                    }
                 }
-            }
         }
 
         return targets.takeIf { it.isNotEmpty() }?.toTypedArray()
@@ -57,26 +56,20 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
      * - RELATION: the getter method that defines the relation
      * - GETTER: the getter method
      * - FIELD: the field declaration itself
-     * - PHPDOC: the class doc comment where @property is declared
+     * - PHPDOC: the @property line in the doc comment of the class that declares it
      * - ATTRIBUTE: the attributes() method
      */
-    private fun resolvePropertyTarget(phpClass: PhpClass, property: ModelProperty): PsiElement? {
+    private fun resolvePropertyTarget(
+        phpClass: PhpClass,
+        property: ModelProperty,
+        propertyName: String
+    ): PsiElement? {
         return when (property.kind) {
-            PropertyKind.RELATION -> {
-                findMethodInHierarchy(phpClass, "get" + property.name.replaceFirstChar { it.uppercase() })
-            }
-            PropertyKind.GETTER -> {
-                findMethodInHierarchy(phpClass, "get" + property.name.replaceFirstChar { it.uppercase() })
-            }
-            PropertyKind.FIELD -> {
-                findFieldInHierarchy(phpClass, property.name)
-            }
-            PropertyKind.PHPDOC -> {
-                findDocCommentInHierarchy(phpClass)
-            }
-            PropertyKind.ATTRIBUTE -> {
-                findMethodInHierarchy(phpClass, "attributes")
-            }
+            PropertyKind.RELATION -> findMethodInHierarchy(phpClass, getterMethodName(propertyName))
+            PropertyKind.GETTER -> findMethodInHierarchy(phpClass, getterMethodName(propertyName))
+            PropertyKind.FIELD -> findFieldInHierarchy(phpClass, propertyName)
+            PropertyKind.PHPDOC -> findDocCommentWithProperty(phpClass, propertyName)
+            PropertyKind.ATTRIBUTE -> findMethodInHierarchy(phpClass, "attributes")
         }
     }
 
@@ -100,17 +93,25 @@ class ModelPropertyGotoDeclarationHandler : GotoDeclarationHandler {
         return null
     }
 
-    private fun findDocCommentInHierarchy(phpClass: PhpClass): PsiElement? {
+    /**
+     * Find the doc comment that actually contains the @property declaration,
+     * not just any doc comment in the hierarchy.
+     */
+    private fun findDocCommentWithProperty(phpClass: PhpClass, propertyName: String): PsiElement? {
         var current: PhpClass? = phpClass
         while (current != null) {
             val docComment = current.docComment
-            if (docComment != null) return docComment
+            if (docComment != null && docComment.text.contains("\$${propertyName}")) {
+                return docComment
+            }
             current = current.superClass
         }
         return null
     }
 
-    override fun getActionText(context: DataContext): String? {
-        return null
+    private fun getterMethodName(propertyName: String): String {
+        return "get" + propertyName.replaceFirstChar { it.uppercaseChar() }
     }
+
+    override fun getActionText(context: DataContext): String? = null
 }

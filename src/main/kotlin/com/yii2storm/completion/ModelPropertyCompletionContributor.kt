@@ -30,24 +30,20 @@ class ModelPropertyCompletionContributor : CompletionContributor() {
                     val resolver = ModelPropertyResolver.getInstance(project)
 
                     val modelClasses = ModelPropertyPsiUtil.resolveModelClasses(project, fieldReference)
-                    if (modelClasses.isEmpty()) {
-                        return
-                    }
+                    if (modelClasses.isEmpty()) return
 
                     val added = linkedSetOf<String>()
 
                     modelClasses.forEach { phpClass ->
                         resolver.getModelProperties(phpClass).forEach { property ->
-                            if (!added.add(property.name)) {
-                                return@forEach
+                            if (added.add(property.name)) {
+                                result.addElement(
+                                    LookupElementBuilder
+                                        .create(property.name)
+                                        .withTypeText(property.type?.toString() ?: "", true)
+                                        .withTailText(" ${kindLabel(property.kind)}", true)
+                                )
                             }
-
-                            result.addElement(
-                                LookupElementBuilder
-                                    .create(property.name)
-                                    .withTypeText(property.type?.toString(), true)
-                                    .withTailText(" ${kindLabel(property.kind)}", true)
-                            )
                         }
                     }
                 }
@@ -55,13 +51,11 @@ class ModelPropertyCompletionContributor : CompletionContributor() {
         )
     }
 
-    private fun kindLabel(kind: PropertyKind): String {
-        return when (kind) {
-            PropertyKind.FIELD -> "[field]"
-            PropertyKind.PHPDOC -> "[phpdoc]"
-            PropertyKind.GETTER -> "[getter]"
-            PropertyKind.RELATION -> "[relation]"
-            PropertyKind.ATTRIBUTE -> "[attribute]"
-        }
+    private fun kindLabel(kind: PropertyKind): String = when (kind) {
+        PropertyKind.RELATION -> "[relation]"
+        PropertyKind.GETTER -> "[getter]"
+        PropertyKind.FIELD -> "[field]"
+        PropertyKind.PHPDOC -> "[phpdoc]"
+        PropertyKind.ATTRIBUTE -> "[attribute]"
     }
 }

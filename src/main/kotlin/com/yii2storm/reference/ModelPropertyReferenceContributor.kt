@@ -32,15 +32,22 @@ class ModelPropertyReferenceContributor : PsiReferenceContributor() {
                         return PsiReference.EMPTY_ARRAY
                     }
 
-                    if (!ModelPropertyPsiUtil.isMagicModelPropertyAccess(element.project, fieldReference)) {
+                    val modelClasses = ModelPropertyPsiUtil.resolveModelClasses(element.project, fieldReference)
+                    if (modelClasses.isEmpty()) {
+                        return PsiReference.EMPTY_ARRAY
+                    }
+
+                    val resolver = ModelPropertyResolver.getInstance(element.project)
+                    val hasProperty = modelClasses.any { phpClass ->
+                        resolver.hasProperty(phpClass, propertyName)
+                    }
+
+                    if (!hasProperty) {
                         return PsiReference.EMPTY_ARRAY
                     }
 
                     return arrayOf(
-                        ModelPropertyPsiReference(
-                            element = element,
-                            fieldReference = fieldReference
-                        )
+                        ModelPropertyPsiReference(element, fieldReference)
                     )
                 }
             }
@@ -67,6 +74,7 @@ private class ModelPropertyPsiReference(
             .mapNotNull { phpClass -> resolver.resolveProperty(phpClass, propertyName) }
             .distinct()
             .map { target -> PsiElementResolveResult(target) }
+            .distinctBy { it.element }
             .toTypedArray()
     }
 }

@@ -10,9 +10,18 @@ import com.jetbrains.php.lang.psi.resolve.types.PhpTypeProvider4
 import com.yii2storm.resolver.ModelPropertyResolver
 import com.yii2storm.util.ModelPropertyPsiUtil
 
+/**
+ * Provides type inference for magic model properties.
+ * Uses the signature-based caching mechanism of PhpTypeProvider4.
+ *
+ * The flow:
+ * 1. getType() is called first — returns a signature string with our key
+ * 2. complete() is called later — resolves the signature back to actual types
+ * 3. getBySignature() is the fallback for signature resolution
+ */
 class ModelPropertyTypeProvider : PhpTypeProvider4 {
 
-    override fun getKey(): Char = '\u03A8'
+    override fun getKey(): Char = KEY
 
     override fun getType(psiElement: PsiElement): PhpType? {
         val fieldReference = psiElement as? FieldReference ?: return null
@@ -20,6 +29,8 @@ class ModelPropertyTypeProvider : PhpTypeProvider4 {
         val project = psiElement.project
         val resolver = ModelPropertyResolver.getInstance(project)
         val modelClasses = ModelPropertyPsiUtil.resolveModelClasses(project, fieldReference)
+
+        if (modelClasses.isEmpty()) return null
 
         val resultType = PhpType()
 
@@ -29,11 +40,24 @@ class ModelPropertyTypeProvider : PhpTypeProvider4 {
             }
         }
 
-        return if (resultType.isEmpty) null else resultType
+        if (resultType.isEmpty) return null
+
+        // Return a signature that will be resolved later by complete()
+        val signature = StringBuilder().append(KEY).append(signatureSeparator).append(resultType.types.joinToString("|"))
+        return PhpType().add(signature.toString())
     }
 
     override fun complete(expression: String, project: Project): PhpType? {
-        return null
+        // This is called to resolve our signature back to actual types
+        val types = expression.split("|")
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it.startsWith("\\") }
+
+        if (types.isEmpty()) return null
+
+        val resultType = PhpType()
+        types.forEach { resultType.add(it) }
+        return resultType
     }
 
     override fun getBySignature(
@@ -42,14 +66,20 @@ class ModelPropertyTypeProvider : PhpTypeProvider4 {
         depth: Int,
         project: Project
     ): MutableCollection<out PhpNamedElement> {
-        if (depth > 2) {
-            return mutableListOf()
-        }
+        if (depth > MAX_DEPTH) return mutableListOf()
 
         return expression.split("|")
-            .flatMap { fqn -> PhpIndex.getInstance(project).getAnyByFQN(fqn) }
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it.startsWith("\\") }
+            .flatMap { fqn -> PhpIndex.getInstance(project).getClassesByFQN(fqn) }
             .filterIsInstance<PhpNamedElement>()
-            .distinctBy { element -> element.fqn }
+            .distinctBy { it.fqn }
             .toMutableList()
+    }
+
+    companion object {
+        private const val KEY = '\u03A8'
+        private const val MAX_DEPTH = 10
+        private const val signatureSeparator = '\u00B7'
     }
 }

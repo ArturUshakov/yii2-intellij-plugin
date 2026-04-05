@@ -12,23 +12,25 @@ class ModelPropertyResolver private constructor() {
     companion object {
         private val INSTANCE = ModelPropertyResolver()
 
-        private val phpDocPropertyRegex = Regex(
+        private val YII_MODEL_CLASSES = setOf(
+            "\\yii\\db\\ActiveRecord",
+            "\\yii\\base\\Model"
+        )
+
+        private val PHP_DOC_PROPERTY_REGEX = Regex(
             "@property(?:-read|-write)?\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)"
         )
 
-        private val singleQuotedStringRegex = Regex("'([^']+)'")
-
-        private val hasOneRegex = Regex(
-            "->hasOne\\(\\s*([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)::class"
-        )
-
-        private val hasManyRegex = Regex(
-            "->hasMany\\(\\s*([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)::class"
-        )
+        private const val RELATION_METHOD_PREFIX = "get"
 
         fun getInstance(project: Project): ModelPropertyResolver = INSTANCE
     }
 
+    /**
+     * Get all magic properties for a model class, collected from the entire hierarchy.
+     * Relations override getters and plain properties with the same name.
+     * Order: FIELD < PHPDOC < GETTER < RELATION < ATTRIBUTE
+     */
     fun getModelProperties(phpClass: PhpClass): List<ModelProperty> {
         if (!isModelClass(phpClass)) {
             return emptyList()
@@ -37,11 +39,7 @@ class ModelPropertyResolver private constructor() {
         val properties = linkedMapOf<String, ModelProperty>()
 
         collectClassHierarchy(phpClass).forEach { currentClass ->
-            getPublicProperties(currentClass).forEach { properties.putIfAbsent(it.name, it) }
-            getPhpDocProperties(currentClass).forEach { properties.putIfAbsent(it.name, it) }
-            getRelationProperties(currentClass).forEach { properties[it.name] = it }
-            getGetterProperties(currentClass).forEach { properties.putIfAbsent(it.name, it) }
-            getAttributesMethodProperties(currentClass).forEach { properties.putIfAbsent(it.name, it) }
+            collectFrom(currentClass, properties)
         }
 
         return properties.values.toList()
@@ -59,18 +57,35 @@ class ModelPropertyResolver private constructor() {
         return findProperty(phpClass, propertyName) != null
     }
 
+    /**
+     * Check if a class extends yii\db\ActiveRecord or yii\base\Model.
+     * Walks up the inheritance chain.
+     */
     fun isModelClass(phpClass: PhpClass): Boolean {
-        var currentClass: PhpClass? = phpClass
-
-        while (currentClass != null) {
-            val fqn = currentClass.fqn
-            if (fqn == "\\yii\\db\\ActiveRecord" || fqn == "\\yii\\base\\Model") {
+        var current: PhpClass? = phpClass
+        while (current != null) {
+            if (current.fqn in YII_MODEL_CLASSES) {
                 return true
             }
-            currentClass = currentClass.superClass
+            current = current.superClass
         }
-
         return false
+    }
+
+    // --- Internal collection logic ---
+
+    private fun collectFrom(
+        phpClass: PhpClass,
+        properties: MutableMap<String, ModelProperty>
+    ) {
+        // Lower-priority sources first (putIfAbsent = first wins)
+        getPublicProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
+        getPhpDocProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
+        getGetterProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
+
+        // Higher-priority sources override (direct put)
+        getRelationProperties(phpClass).forEach { properties[it.name] = it }
+        getAttributesMethodProperties(phpClass).forEach { properties.putIfAbsent(it.name, it) }
     }
 
     private fun findProperty(phpClass: PhpClass, propertyName: String): ModelProperty? {
@@ -79,19 +94,19 @@ class ModelPropertyResolver private constructor() {
 
     private fun collectClassHierarchy(phpClass: PhpClass): List<PhpClass> {
         val result = mutableListOf<PhpClass>()
-        var currentClass: PhpClass? = phpClass
-
-        while (currentClass != null) {
-            result.add(currentClass)
-            currentClass = currentClass.superClass
+        var current: PhpClass? = phpClass
+        while (current != null) {
+            result.add(current)
+            current = current.superClass
         }
-
         return result
     }
 
+    // --- Property source extractors ---
+
     private fun getPublicProperties(phpClass: PhpClass): List<ModelProperty> {
         return phpClass.fields
-            .filter { field -> hasPublicVisibility(field) }
+            .filter { field -> isPublic(field) }
             .map { field ->
                 ModelProperty(
                     name = field.name,
@@ -103,38 +118,39 @@ class ModelPropertyResolver private constructor() {
     }
 
     private fun getPhpDocProperties(phpClass: PhpClass): List<ModelProperty> {
-        val docText = phpClass.docComment?.text ?: return emptyList()
+        val docComment = phpClass.docComment ?: return emptyList()
+        val docText = docComment.text
 
-        return phpDocPropertyRegex.findAll(docText)
-            .mapNotNull { matchResult ->
-                val rawType = matchResult.groupValues[1].trim()
-                val propertyName = matchResult.groupValues[2].trim()
-
-                if (propertyName.isBlank()) {
-                    null
-                } else {
-                    ModelProperty(
-                        name = propertyName,
-                        type = buildPhpType(rawType),
-                        kind = PropertyKind.PHPDOC,
-                        source = phpClass.docComment ?: phpClass
-                    )
-                }
+        return PHP_DOC_PROPERTY_REGEX.findAll(docText)
+            .mapNotNull { match ->
+                val rawType = match.groupValues[1].trim()
+                val propertyName = match.groupValues[2].trim()
+                if (propertyName.isBlank()) null
+                else ModelProperty(
+                    name = propertyName,
+                    type = buildPhpType(rawType),
+                    kind = PropertyKind.PHPDOC,
+                    source = docComment
+                )
             }
             .toList()
     }
 
+    /**
+     * Find all public getX() methods that are NOT relation methods.
+     */
     private fun getGetterProperties(phpClass: PhpClass): List<ModelProperty> {
         return phpClass.methods
             .filter { method ->
-                hasPublicVisibility(method) &&
+                isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith("get") &&
-                    method.name.length > 3
+                    method.name.startsWith(RELATION_METHOD_PREFIX) &&
+                    method.name.length > RELATION_METHOD_PREFIX.length &&
+                    !isRelationMethod(method)
             }
             .map { method ->
                 ModelProperty(
-                    name = getterNameToPropertyName(method.name),
+                    name = toPropertyName(method.name),
                     type = method.type,
                     kind = PropertyKind.GETTER,
                     source = method
@@ -142,18 +158,22 @@ class ModelPropertyResolver private constructor() {
             }
     }
 
+    /**
+     * Find all public getX() methods that contain hasOne/hasMany calls.
+     * These override regular getters with the same property name.
+     */
     private fun getRelationProperties(phpClass: PhpClass): List<ModelProperty> {
         return phpClass.methods
             .filter { method ->
-                hasPublicVisibility(method) &&
+                isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith("get") &&
-                    method.name.length > 3 &&
+                    method.name.startsWith(RELATION_METHOD_PREFIX) &&
+                    method.name.length > RELATION_METHOD_PREFIX.length &&
                     isRelationMethod(method)
             }
             .map { method ->
                 ModelProperty(
-                    name = getterNameToPropertyName(method.name),
+                    name = toPropertyName(method.name),
                     type = extractRelationType(method),
                     kind = PropertyKind.RELATION,
                     source = method
@@ -161,16 +181,20 @@ class ModelPropertyResolver private constructor() {
             }
     }
 
+    /**
+     * Parse the attributes() method to find additional property names.
+     */
     private fun getAttributesMethodProperties(phpClass: PhpClass): List<ModelProperty> {
         val attributesMethod = phpClass.methods.firstOrNull { method ->
             method.name == "attributes" && method.parameters.isEmpty()
         } ?: return emptyList()
 
-        val names = singleQuotedStringRegex.findAll(attributesMethod.text)
-            .map { matchResult -> matchResult.groupValues[1] }
-            .filter { value -> value.isNotBlank() }
+        // Extract string literals from the method body
+        val stringRegex = Regex("'([^']+)'|\"([^\"]+)\"")
+        val names = stringRegex.findAll(attributesMethod.text)
+            .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] }.trim() }
+            .filter { it.isNotBlank() }
             .distinct()
-            .toList()
 
         return names.map { propertyName ->
             ModelProperty(
@@ -179,56 +203,69 @@ class ModelPropertyResolver private constructor() {
                 kind = PropertyKind.ATTRIBUTE,
                 source = attributesMethod
             )
-        }
+        }.toList()
     }
 
+    // --- Relation detection ---
+
+    /**
+     * Detect if a method is a Yii2 relation by checking for hasOne/hasMany calls.
+     * Uses text-based detection on the method body since we need to parse PHP code structure.
+     */
     private fun isRelationMethod(method: Method): Boolean {
         val text = method.text
-        return text.contains("->hasOne(") || text.contains("->hasMany(")
+        return text.contains("hasOne(") || text.contains("hasMany(")
     }
 
+    /**
+     * Extract the related model class FQN from hasOne/hasMany call.
+     * Supports patterns like:
+     *   $this->hasOne(Model::class, [...])
+     *   $this->hasMany(\app\models\Model::class, [...])
+     */
     private fun extractRelationType(method: Method): PhpType? {
         val text = method.text
 
-        hasOneRegex.find(text)?.let { matchResult ->
-            return buildPhpType(matchResult.groupValues[1].trim())
+        // Try to find ClassName::class pattern inside hasOne/hasMany
+        val classPattern = Regex("(?:hasOne|hasMany)\\s*\\(\\s*([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)::class")
+        classPattern.find(text)?.let { match ->
+            val fqn = normalizeFqn(match.groupValues[1].trim())
+            if (fqn != null) return buildPhpTypeFromFqn(fqn)
         }
 
-        hasManyRegex.find(text)?.let { matchResult ->
-            return buildPhpType(matchResult.groupValues[1].trim())
-        }
-
+        // Fallback: use method return type
         return method.type
     }
 
-    private fun getterNameToPropertyName(getterName: String): String {
-        val baseName = getterName.removePrefix("get")
-        if (baseName.isEmpty()) {
-            return getterName
-        }
+    // --- Helpers ---
 
-        return baseName.replaceFirstChar { firstChar ->
-            firstChar.lowercase()
-        }
+    private fun toPropertyName(getterName: String): String {
+        val base = getterName.removePrefix(RELATION_METHOD_PREFIX)
+        if (base.isEmpty()) return getterName
+        return base.replaceFirstChar { it.lowercaseChar() }
     }
 
     private fun buildPhpType(rawType: String?): PhpType? {
-        val normalizedType = rawType
+        val normalized = rawType
             ?.trim()
             ?.substringBefore("|")
             ?.removeSuffix("[]")
             ?.takeIf { it.isNotBlank() }
             ?: return null
-
-        return PhpType().add(normalizedType)
+        return PhpType().add(normalized)
     }
 
-    private fun hasPublicVisibility(field: Field): Boolean {
-        return field.modifier.isPublic
+    private fun buildPhpTypeFromFqn(fqn: String): PhpType {
+        return PhpType().add(fqn)
     }
 
-    private fun hasPublicVisibility(method: Method): Boolean {
-        return method.modifier.isPublic
+    private fun isPublic(field: Field): Boolean = field.modifier.isPublic
+
+    private fun isPublic(method: Method): Boolean = method.modifier.isPublic
+
+    private fun normalizeFqn(name: String): String? {
+        if (name.isBlank()) return null
+        return if (name.startsWith("\\")) name else "\\$name"
     }
 }
 
