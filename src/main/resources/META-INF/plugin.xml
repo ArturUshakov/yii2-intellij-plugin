@@ -1,33 +1,82 @@
 <idea-plugin>
     <id>com.yii2storm.modelmagic</id>
-    <name>Yii2Storm Model Magic</name>
-    <vendor email="support@yii2storm.com">Yii2Storm</vendor>
-
-    <idea-version since-build="251" until-build="251.*"/>
+    <name>Yii2 Model Magic</name>
+    <version>1.0.0</version>
+    <vendor email="support@yii2storm.local" url="https://github.com/yii2storm/model-magic">Yii2Storm</vendor>
 
     <description><![CDATA[
-        <html>
-        <body>
-        <p>Improves Yii2 model magic property support in PhpStorm.</p>
+        <h2>Yii2 Model Magic</h2>
+        <p>PhpStorm plugin with full support for Yii2 model magic properties via <code>__get()</code>/<code>__set()</code>.</p>
+        
+        <h3>Features:</h3>
         <ul>
-            <li>Completion for model magic properties</li>
-            <li>Go to declaration for getters, setters, relations, attributes and PHPDoc declarations</li>
-            <li>Reference resolution for model magic properties</li>
-            <li>Unknown property inspection</li>
-            <li>Type inference for getter, setter, relation, PHPDoc and attributes() sources</li>
-            <li>Supports inheritance and traits</li>
+            <li><strong>Code Completion</strong> — Smart autocomplete for magic properties from getters, setters, relations, fields, and PHPDoc</li>
+            <li><strong>Go To Declaration</strong> — Navigate directly to getter/setter method (not just PHPDoc)</li>
+            <li><strong>Type Inference</strong> — Accurate type hints for magic properties</li>
+            <li><strong>Code Inspections</strong> — Detect unknown properties with quick fixes</li>
+            <li><strong>Reference Resolution</strong> — Find usages and rename refactoring work correctly</li>
         </ul>
-        </body>
-        </html>
+        
+        <h3>Property Priority:</h3>
+        <ol>
+            <li>Relations (hasOne/hasMany) — highest priority</li>
+            <li>Getter methods (getXxx())</li>
+            <li>Setter methods (setXxx())</li>
+            <li>Database columns from attributes()</li>
+            <li>Public fields</li>
+            <li>PHPDoc @property annotations — fallback</li>
+        </ol>
+        
+        <h3>Supported:</h3>
+        <ul>
+            <li>yii\db\ActiveRecord</li>
+            <li>yii\base\Model</li>
+            <li>Traits and behaviors</li>
+            <li>ArrayAccess syntax: $model['property']</li>
+        </ul>
     ]]></description>
+
+    <change-notes><![CDATA[
+        <h3>1.0.0</h3>
+        <ul>
+            <li>Initial release with full magic property support</li>
+            <li>Code completion with icons and priority sorting</li>
+            <li>Smart navigation to getters/setters</li>
+            <li>Type inference for all property kinds</li>
+            <li>Inspections with quick fixes</li>
+            <li>ArrayAccess support ($model['property'])</li>
+            <li>Trait and behavior support</li>
+        </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.phpstorm</depends>
     <depends>com.jetbrains.php</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <completion.contributor language="PHP" implementationClass="com.yii2storm.modelmagic.completion.MagicPropertyCompletionContributor"/>
-        <psi.referenceContributor language="PHP" implementation="com.yii2storm.modelmagic.reference.MagicPropertyReferenceContributor"/>
-        <annotator language="PHP" implementationClass="com.yii2storm.modelmagic.annotator.MagicPropertyAnnotator"/>
+
+        <projectService serviceImplementation="com.yii2storm.modelmagic.settings.ModelMagicProjectSettingsService"/>
+
+        <projectConfigurable
+                instance="com.yii2storm.modelmagic.settings.ModelMagicProjectConfigurable"
+                id="com.yii2storm.modelmagic.settings"
+                displayName="Yii2 Model Magic"/>
+
+        <!-- Annotator -->
+        <annotator
+                language="PHP"
+                implementationClass="com.yii2storm.modelmagic.annotator.MagicPropertyAnnotator"/>
+
+        <!-- Completion -->
+        <completion.contributor
+                language="PHP"
+                implementationClass="com.yii2storm.modelmagic.completion.MagicPropertyCompletionContributor"/>
+
+        <!-- References -->
+        <psi.referenceContributor
+                language="PHP"
+                implementation="com.yii2storm.modelmagic.reference.MagicPropertyReferenceContributor"/>
+
+        <!-- Inspection -->
         <localInspection
                 language="PHP"
                 shortName="Yii2UnknownMagicProperty"
@@ -35,7 +84,14 @@
                 groupName="Yii2"
                 enabledByDefault="true"
                 implementationClass="com.yii2storm.modelmagic.inspection.MagicPropertyInspection"/>
-        <php.typeProvider4 implementation="com.yii2storm.modelmagic.type.MagicPropertyTypeProvider"/>
-        <gotoDeclarationHandler implementation="com.yii2storm.modelmagic.navigation.MagicPropertyGotoDeclarationHandler"/>
+
+        <!-- Type -->
+        <php.typeProvider4
+                implementation="com.yii2storm.modelmagic.type.MagicPropertyTypeProvider"/>
+
+        <!-- Navigation / Go to Declaration -->
+        <gotoDeclarationHandler
+                implementation="com.yii2storm.modelmagic.navigation.MagicPropertyGotoDeclarationHandler"/>
+
     </extensions>
 </idea-plugin>

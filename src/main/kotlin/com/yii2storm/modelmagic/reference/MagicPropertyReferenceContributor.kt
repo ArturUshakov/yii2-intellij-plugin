@@ -3,13 +3,12 @@ package com.yii2storm.modelmagic.reference
 import com.intellij.openapi.util.TextRange
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiElementResolveResult
+import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.psi.PsiReference
 import com.intellij.psi.PsiReferenceContributor
 import com.intellij.psi.PsiReferenceProvider
-import com.intellij.psi.PsiReferenceRegistrar
 import com.intellij.psi.ResolveResult
-import com.intellij.psi.PsiElementResolveResult
-import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.util.ProcessingContext
 import com.jetbrains.php.lang.psi.elements.FieldReference
 import com.jetbrains.php.lang.psi.elements.PhpClass
@@ -18,18 +17,18 @@ import com.yii2storm.modelmagic.util.MagicPropertyPsiUtil
 
 class MagicPropertyReferenceContributor : PsiReferenceContributor() {
 
-    override fun registerReferenceProviders(registrar: PsiReferenceRegistrar) {
+    override fun registerReferenceProviders(registrar: com.intellij.psi.PsiReferenceRegistrar) {
         registrar.registerReferenceProvider(
             PlatformPatterns.psiElement().withParent(FieldReference::class.java),
             object : PsiReferenceProvider() {
                 override fun getReferencesByElement(
                     element: PsiElement,
-                    context: ProcessingContext
+                    context: ProcessingContext,
                 ): Array<PsiReference> {
                     val fieldReference = element.parent as? FieldReference ?: return PsiReference.EMPTY_ARRAY
                     return createReferences(element, fieldReference)
                 }
-            }
+            },
         )
     }
 
@@ -45,7 +44,8 @@ class MagicPropertyReferenceContributor : PsiReferenceContributor() {
         }
 
         val resolver = MagicPropertyResolver.getInstance(element.project)
-        if (modelClasses.none { resolver.hasProperty(it, propertyName) }) {
+        val hasProperty = modelClasses.any { phpClass -> resolver.hasProperty(phpClass, propertyName) }
+        if (!hasProperty) {
             return PsiReference.EMPTY_ARRAY
         }
 
@@ -56,7 +56,7 @@ class MagicPropertyReferenceContributor : PsiReferenceContributor() {
 private class MagicPropertyPsiReference(
     element: PsiElement,
     private val propertyName: String,
-    private val modelClasses: List<PhpClass>
+    private val modelClasses: List<PhpClass>,
 ) : PsiPolyVariantReferenceBase<PsiElement>(element, TextRange(0, element.textLength)) {
 
     override fun resolve(): PsiElement? {
@@ -67,10 +67,10 @@ private class MagicPropertyPsiReference(
         val resolver = MagicPropertyResolver.getInstance(element.project)
 
         return modelClasses
-            .flatMap { phpClass -> resolver.getPropertyTargets(phpClass, propertyName) }
-            .sortedByDescending { it.kind.priority }
-            .map { target -> PsiElementResolveResult(target.element) }
-            .distinctBy { it.element }
+            .flatMap { resolver.getPropertyVariants(it, propertyName) }
+            .map { it.source }
+            .distinct()
+            .map(::PsiElementResolveResult)
             .toTypedArray()
     }
 }

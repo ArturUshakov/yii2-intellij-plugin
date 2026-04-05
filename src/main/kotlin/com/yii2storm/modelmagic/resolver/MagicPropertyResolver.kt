@@ -1,5 +1,6 @@
 package com.yii2storm.modelmagic.resolver
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
 import com.intellij.psi.util.CachedValueProvider
@@ -11,24 +12,26 @@ import com.jetbrains.php.lang.psi.elements.PhpClass
 import com.jetbrains.php.lang.psi.elements.PhpReference
 import com.jetbrains.php.lang.psi.elements.PhpUseList
 import com.jetbrains.php.lang.psi.resolve.types.PhpType
+import com.yii2storm.modelmagic.settings.ModelMagicProjectSettingsService
 
 class MagicPropertyResolver {
 
     companion object {
+        private val LOG = Logger.getInstance(MagicPropertyResolver::class.java)
         private val INSTANCE = MagicPropertyResolver()
-
-        private val yiiModelClasses = setOf(
+        private val YII_MODEL_CLASSES = setOf(
             "\\yii\\db\\ActiveRecord",
             "\\yii\\base\\Model",
-            "\\yii\\db\\BaseActiveRecord"
+            "\\yii\\db\\BaseActiveRecord",
         )
-
-        private val phpDocPropertyRegex = Regex(
-            "@(property|property-read|property-write)\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)"
+        private val PHP_DOC_PROPERTY_READ_REGEX = Regex(
+            "@property-read\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
         )
-
-        private const val getterPrefix = "get"
-        private const val setterPrefix = "set"
+        private val PHP_DOC_PROPERTY_WRITE_REGEX = Regex(
+            "@property-write\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        private const val GETTER_PREFIX = "get"
+        private const val SETTER_PREFIX = "set"
 
         fun getInstance(project: Project): MagicPropertyResolver = INSTANCE
     }
@@ -39,12 +42,32 @@ class MagicPropertyResolver {
         }
 
         return CachedValuesManager.getCachedValue(phpClass) {
-            CachedValueProvider.Result.create(
-                computeModelProperties(phpClass),
-                phpClass,
-                PsiModificationTracker.MODIFICATION_COUNT
-            )
+            val result = computeModelProperties(phpClass)
+            CachedValueProvider.Result.create(result, PsiModificationTracker.MODIFICATION_COUNT)
         }
+    }
+
+    fun getPropertyVariants(phpClass: PhpClass, propertyName: String): List<MagicProperty> {
+        if (!isModelClass(phpClass)) {
+            return emptyList()
+        }
+
+        val settings = ModelMagicProjectSettingsService.getInstance(phpClass.project)
+        val variants = collectClassHierarchy(phpClass)
+            .flatMap { collectFrom(it) }
+            .filter { normalizedPropertyIdentity(it.name) == normalizedPropertyIdentity(propertyName) }
+            .filter { settings.isSourceEnabled(it.kind) }
+            .distinctBy { variantKey(it) }
+
+        val hasNonPhpDoc = variants.any { !it.kind.isPhpDoc() }
+
+        return variants
+            .filter { !hasNonPhpDoc || !it.kind.isPhpDoc() }
+            .sortedWith(
+                compareBy<MagicProperty> { settings.navigationPriority(it.kind) }
+                    .thenBy { navigationTieBreaker(it.kind) }
+                    .thenBy { sourceOrder(it.source) }
+            )
     }
 
     fun getPropertyType(phpClass: PhpClass, propertyName: String): PhpType? {
@@ -52,102 +75,114 @@ class MagicPropertyResolver {
     }
 
     fun resolveProperty(phpClass: PhpClass, propertyName: String): PsiElement? {
-        return findProperty(phpClass, propertyName)?.source
+        return getPropertyVariants(phpClass, propertyName).firstOrNull()?.source
+            ?: findProperty(phpClass, propertyName)?.source
     }
 
     fun hasProperty(phpClass: PhpClass, propertyName: String): Boolean {
         return findProperty(phpClass, propertyName) != null
     }
 
-    fun findProperty(phpClass: PhpClass, propertyName: String): MagicProperty? {
-        return getModelProperties(phpClass).firstOrNull { it.name == propertyName }
-    }
-
-    fun getPropertyTargets(phpClass: PhpClass, propertyName: String): List<MagicPropertyTarget> {
-        val result = LinkedHashMap<String, MagicPropertyTarget>()
-
-        collectClassHierarchy(phpClass).forEach { currentClass ->
-            collectFieldTargets(currentClass, propertyName, result)
-            collectPhpDocTargets(currentClass, propertyName, result)
-            collectMethodTargets(currentClass, propertyName, result)
-            collectAttributesTargets(currentClass, propertyName, result)
-        }
-
-        val targets = result.values.sortedByDescending { it.kind.priority }
-        val hasConcreteTargets = targets.any { it.kind != PropertyKind.PHPDOC && it.kind != PropertyKind.PHPDOC_READ && it.kind != PropertyKind.PHPDOC_WRITE }
-
-        return if (hasConcreteTargets) {
-            targets.filter { it.kind != PropertyKind.PHPDOC && it.kind != PropertyKind.PHPDOC_READ && it.kind != PropertyKind.PHPDOC_WRITE }
-        } else {
-            targets
-        }
-    }
-
-    fun getGetterNames(propertyName: String): List<String> {
-        return buildAccessorNames(getterPrefix, propertyName)
-    }
-
-    fun getSetterNames(propertyName: String): List<String> {
-        return buildAccessorNames(setterPrefix, propertyName)
-    }
-
-    fun propertyNameToGetter(propertyName: String): String {
-        return getGetterNames(propertyName).first()
-    }
-
-    fun propertyNameToSetter(propertyName: String): String {
-        return getSetterNames(propertyName).first()
-    }
-
     fun isModelClass(phpClass: PhpClass): Boolean {
-        return collectClassHierarchy(phpClass).any { it.fqn in yiiModelClasses }
-    }
-
-    private fun computeModelProperties(phpClass: PhpClass): List<MagicProperty> {
-        val properties = linkedMapOf<String, MagicProperty>()
-
-        collectClassHierarchy(phpClass)
-            .asReversed()
-            .forEach { currentClass ->
-                collectByPriority(properties, getPublicProperties(currentClass))
-                collectByPriority(properties, getPhpDocProperties(currentClass))
-                collectByPriority(properties, getGetterProperties(currentClass))
-                collectByPriority(properties, getSetterProperties(currentClass))
-                collectByPriority(properties, getRelationProperties(currentClass))
-                collectByPriority(properties, getAttributesMethodProperties(currentClass))
-            }
-
-        return properties.values.toList()
-    }
-
-    private fun collectByPriority(
-        properties: MutableMap<String, MagicProperty>,
-        candidates: List<MagicProperty>
-    ) {
-        candidates.forEach { candidate ->
-            val existing = properties[candidate.name]
-            if (existing == null || candidate.kind.priority >= existing.kind.priority) {
-                properties[candidate.name] = candidate
-            }
-        }
-    }
-
-    private fun collectClassHierarchy(phpClass: PhpClass): List<PhpClass> {
-        val result = mutableListOf<PhpClass>()
-        val visited = linkedSetOf<String>()
+        val visited = mutableSetOf<String>()
         val queue = ArrayDeque<PhpClass>()
         queue.add(phpClass)
 
         while (queue.isNotEmpty()) {
             val current = queue.removeFirst()
-            val key = current.fqn.ifBlank { current.name }
-            if (!visited.add(key)) {
+            if (current.fqn in YII_MODEL_CLASSES) {
+                return true
+            }
+            if (!visited.add(current.fqn)) {
                 continue
             }
+            current.superClass?.let(queue::add)
+            getTraits(current).forEach { trait ->
+                if (trait.fqn !in visited) {
+                    queue.add(trait)
+                }
+            }
+        }
 
+        return false
+    }
+
+    fun propertyNameToGetter(propertyName: String): String {
+        val variants = propertyNameVariants(propertyName)
+        val getterCandidates = variants.map { GETTER_PREFIX + it.replaceFirstChar(Char::uppercaseChar) }
+        return getterCandidates.first()
+    }
+
+    fun propertyNameToSetter(propertyName: String): String {
+        val variants = propertyNameVariants(propertyName)
+        val setterCandidates = variants.map { SETTER_PREFIX + it.replaceFirstChar(Char::uppercaseChar) }
+        return setterCandidates.first()
+    }
+
+    fun propertyNameToGetterCandidates(propertyName: String): List<String> {
+        return propertyNameVariants(propertyName)
+            .map { GETTER_PREFIX + it.replaceFirstChar(Char::uppercaseChar) }
+            .distinct()
+    }
+
+    fun propertyNameToSetterCandidates(propertyName: String): List<String> {
+        return propertyNameVariants(propertyName)
+            .map { SETTER_PREFIX + it.replaceFirstChar(Char::uppercaseChar) }
+            .distinct()
+    }
+
+    private fun computeModelProperties(phpClass: PhpClass): List<MagicProperty> {
+        LOG.debug("Computing magic properties for ${phpClass.fqn}")
+        val settings = ModelMagicProjectSettingsService.getInstance(phpClass.project)
+
+        return collectClassHierarchy(phpClass)
+            .flatMap { collectFrom(it) }
+            .filter { settings.isSourceEnabled(it.kind) }
+            .groupBy { normalizedPropertyIdentity(it.name) }
+            .mapNotNull { (_, variants) ->
+                val selected = variants.minWithOrNull(
+                    compareBy<MagicProperty> { settings.resolutionPriority(it.kind) }
+                        .thenBy { resolutionTieBreaker(it.kind) }
+                        .thenBy { sourceOrder(it.source) }
+                ) ?: return@mapNotNull null
+                selected.copy(name = preferredDisplayName(selected, variants))
+            }
+            .sortedBy { it.name }
+    }
+
+    private fun collectFrom(phpClass: PhpClass): List<MagicProperty> {
+        return buildList {
+            addAll(getPublicProperties(phpClass))
+            addAll(getPhpDocProperties(phpClass))
+            addAll(getGetterProperties(phpClass))
+            addAll(getSetterProperties(phpClass))
+            addAll(getRelationProperties(phpClass))
+            addAll(getAttributesMethodProperties(phpClass))
+        }
+    }
+
+    private fun findProperty(phpClass: PhpClass, propertyName: String): MagicProperty? {
+        return getModelProperties(phpClass).firstOrNull { it.name == propertyName }
+    }
+
+    private fun collectClassHierarchy(phpClass: PhpClass): List<PhpClass> {
+        val result = mutableListOf<PhpClass>()
+        val visited = mutableSetOf<String>()
+        val queue = ArrayDeque<PhpClass>()
+        queue.add(phpClass)
+
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            if (!visited.add(current.fqn)) {
+                continue
+            }
             result.add(current)
-            getTraits(current).forEach(queue::addLast)
-            current.superClass?.let(queue::addLast)
+            current.superClass?.let(queue::add)
+            getTraits(current).forEach { trait ->
+                if (trait.fqn !in visited) {
+                    queue.add(trait)
+                }
+            }
         }
 
         return result
@@ -156,269 +191,310 @@ class MagicPropertyResolver {
     private fun getTraits(phpClass: PhpClass): List<PhpClass> {
         return phpClass.children
             .filterIsInstance<PhpUseList>()
-            .flatMap { useList ->
-                useList.children.filterIsInstance<PhpReference>().mapNotNull { reference ->
-                    reference.resolve() as? PhpClass
+            .flatMap { traitUse ->
+                traitUse.children.filterIsInstance<PhpReference>().mapNotNull { ref ->
+                    ref.resolve() as? PhpClass
                 }
             }
-            .distinctBy { it.fqn }
     }
 
     private fun getPublicProperties(phpClass: PhpClass): List<MagicProperty> {
         return phpClass.fields
-            .filter { it.modifier.isPublic }
+            .filter(::isPublic)
             .map { field ->
-                MagicProperty(field.name, field.type, PropertyKind.FIELD, field)
+                MagicProperty(
+                    name = field.name,
+                    type = field.type,
+                    kind = PropertyKind.FIELD,
+                    source = field,
+                )
             }
     }
 
     private fun getPhpDocProperties(phpClass: PhpClass): List<MagicProperty> {
         val docComment = phpClass.docComment ?: return emptyList()
+        val docText = docComment.text
 
-        return phpDocPropertyRegex.findAll(docComment.text)
-            .mapNotNull { match ->
-                val annotation = match.groupValues[1]
-                val rawType = match.groupValues[2].trim()
-                val propertyName = match.groupValues[3].trim()
-                val kind = when (annotation) {
-                    "property-read" -> PropertyKind.PHPDOC_READ
-                    "property-write" -> PropertyKind.PHPDOC_WRITE
-                    else -> PropertyKind.PHPDOC
+        return buildList {
+            Regex("@property\\s+([^\\s]+)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)")
+                .findAll(docText)
+                .forEach { match ->
+                    add(
+                        MagicProperty(
+                            name = match.groupValues[2].trim(),
+                            type = buildPhpType(match.groupValues[1].trim()),
+                            kind = PropertyKind.PHPDOC,
+                            source = docComment,
+                        ),
+                    )
                 }
-                propertyName.takeIf { it.isNotBlank() }?.let {
-                    MagicProperty(it, buildPhpType(rawType), kind, docComment)
-                }
+
+            PHP_DOC_PROPERTY_READ_REGEX.findAll(docText).forEach { match ->
+                add(
+                    MagicProperty(
+                        name = match.groupValues[2].trim(),
+                        type = buildPhpType(match.groupValues[1].trim()),
+                        kind = PropertyKind.PHPDOC_READ,
+                        source = docComment,
+                    ),
+                )
             }
-            .toList()
+
+            PHP_DOC_PROPERTY_WRITE_REGEX.findAll(docText).forEach { match ->
+                add(
+                    MagicProperty(
+                        name = match.groupValues[2].trim(),
+                        type = buildPhpType(match.groupValues[1].trim()),
+                        kind = PropertyKind.PHPDOC_WRITE,
+                        source = docComment,
+                    ),
+                )
+            }
+        }.filter { it.name.isNotBlank() }
     }
 
     private fun getGetterProperties(phpClass: PhpClass): List<MagicProperty> {
         return phpClass.methods
             .filter { method ->
-                method.modifier.isPublic &&
+                isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith(getterPrefix) &&
-                    method.name.length > getterPrefix.length &&
+                    method.name.startsWith(GETTER_PREFIX) &&
+                    method.name.length > GETTER_PREFIX.length &&
                     !isRelationMethod(method)
             }
-            .mapNotNull { method ->
-                accessorToPropertyNames(method.name, getterPrefix).firstOrNull()?.let { propertyName ->
-                    MagicProperty(propertyName, method.type, PropertyKind.GETTER, method)
-                }
+            .map { method ->
+                MagicProperty(
+                    name = accessorToPropertyName(method.name, GETTER_PREFIX),
+                    type = getGetterReturnType(method),
+                    kind = PropertyKind.GETTER,
+                    source = method,
+                )
             }
     }
 
     private fun getSetterProperties(phpClass: PhpClass): List<MagicProperty> {
         return phpClass.methods
             .filter { method ->
-                method.modifier.isPublic &&
+                isPublic(method) &&
+                    method.name.startsWith(SETTER_PREFIX) &&
+                    method.name.length > SETTER_PREFIX.length &&
                     method.parameters.isNotEmpty() &&
-                    method.name.startsWith(setterPrefix) &&
-                    method.name.length > setterPrefix.length &&
                     !isRelationMethod(method)
             }
-            .mapNotNull { method ->
-                accessorToPropertyNames(method.name, setterPrefix).firstOrNull()?.let { propertyName ->
-                    MagicProperty(propertyName, getSetterParameterType(method), PropertyKind.SETTER, method)
-                }
+            .map { method ->
+                MagicProperty(
+                    name = accessorToPropertyName(method.name, SETTER_PREFIX),
+                    type = getSetterParameterType(method),
+                    kind = PropertyKind.SETTER,
+                    source = method,
+                )
             }
     }
 
     private fun getRelationProperties(phpClass: PhpClass): List<MagicProperty> {
         return phpClass.methods
             .filter { method ->
-                method.modifier.isPublic &&
+                isPublic(method) &&
                     method.parameters.isEmpty() &&
-                    method.name.startsWith(getterPrefix) &&
-                    method.name.length > getterPrefix.length &&
+                    method.name.startsWith(GETTER_PREFIX) &&
+                    method.name.length > GETTER_PREFIX.length &&
                     isRelationMethod(method)
             }
-            .mapNotNull { method ->
-                accessorToPropertyNames(method.name, getterPrefix).firstOrNull()?.let { propertyName ->
-                    MagicProperty(propertyName, extractRelationType(method), PropertyKind.RELATION, method)
-                }
+            .map { method ->
+                MagicProperty(
+                    name = accessorToPropertyName(method.name, GETTER_PREFIX),
+                    type = extractRelationType(method) ?: getGetterReturnType(method),
+                    kind = PropertyKind.RELATION,
+                    source = method,
+                )
             }
     }
 
     private fun getAttributesMethodProperties(phpClass: PhpClass): List<MagicProperty> {
-        val attributesMethod = phpClass.methods.firstOrNull { it.name == "attributes" && it.parameters.isEmpty() }
-            ?: return emptyList()
+        val attributesMethod = phpClass.methods.firstOrNull { method ->
+            method.name == "attributes" && method.parameters.isEmpty()
+        } ?: return emptyList()
 
-        val body = attributesMethod.text
-        val returnArrayMatch = Regex("return\\s*\\[(.*?)]", setOf(RegexOption.DOT_MATCHES_ALL))
-            .find(body)
-            ?: return emptyList()
-
-        return Regex("['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]")
-            .findAll(returnArrayMatch.groupValues[1])
-            .map { it.groupValues[1] }
-            .distinct()
-            .map { propertyName ->
-                MagicProperty(propertyName, null, PropertyKind.ATTRIBUTE, attributesMethod)
-            }
-            .toList()
-    }
-
-    private fun collectFieldTargets(
-        phpClass: PhpClass,
-        propertyName: String,
-        result: MutableMap<String, MagicPropertyTarget>
-    ) {
-        phpClass.fields
-            .firstOrNull { it.modifier.isPublic && it.name == propertyName }
-            ?.let { field ->
-                result.putIfAbsent(targetKey(field), MagicPropertyTarget(field, PropertyKind.FIELD))
-            }
-    }
-
-    private fun collectPhpDocTargets(
-        phpClass: PhpClass,
-        propertyName: String,
-        result: MutableMap<String, MagicPropertyTarget>
-    ) {
-        val docComment = phpClass.docComment ?: return
-        phpDocPropertyRegex.findAll(docComment.text).forEach { match ->
-            if (match.groupValues[3] != propertyName) {
-                return@forEach
-            }
-            val kind = when (match.groupValues[1]) {
-                "property-read" -> PropertyKind.PHPDOC_READ
-                "property-write" -> PropertyKind.PHPDOC_WRITE
-                else -> PropertyKind.PHPDOC
-            }
-            result.putIfAbsent(targetKey(docComment, kind.name), MagicPropertyTarget(docComment, kind))
-        }
-    }
-
-    private fun collectMethodTargets(
-        phpClass: PhpClass,
-        propertyName: String,
-        result: MutableMap<String, MagicPropertyTarget>
-    ) {
-        phpClass.methods
-            .filter { it.modifier.isPublic }
-            .forEach { method ->
-                when {
-                    method.parameters.isEmpty() && method.name.startsWith(getterPrefix) -> {
-                        if (propertyName in accessorToPropertyNames(method.name, getterPrefix)) {
-                            val kind = if (isRelationMethod(method)) PropertyKind.RELATION else PropertyKind.GETTER
-                            result.putIfAbsent(targetKey(method), MagicPropertyTarget(method, kind))
-                        }
-                    }
-                    method.parameters.isNotEmpty() && method.name.startsWith(setterPrefix) -> {
-                        if (propertyName in accessorToPropertyNames(method.name, setterPrefix)) {
-                            result.putIfAbsent(targetKey(method), MagicPropertyTarget(method, PropertyKind.SETTER))
-                        }
+        val propertyNames = mutableListOf<String>()
+        attributesMethod.accept(object : com.intellij.psi.PsiRecursiveElementVisitor() {
+            override fun visitElement(element: PsiElement) {
+                super.visitElement(element)
+                val text = element.text
+                if ((text.startsWith("'") && text.endsWith("'") && text.length > 2) ||
+                    (text.startsWith("\"") && text.endsWith("\"") && text.length > 2)
+                ) {
+                    val name = text.substring(1, text.length - 1)
+                    if (name.isNotBlank()) {
+                        propertyNames.add(name)
                     }
                 }
             }
-    }
+        })
 
-    private fun collectAttributesTargets(
-        phpClass: PhpClass,
-        propertyName: String,
-        result: MutableMap<String, MagicPropertyTarget>
-    ) {
-        val attributesMethod = phpClass.methods.firstOrNull { it.name == "attributes" && it.parameters.isEmpty() }
-            ?: return
-        if (getAttributesMethodProperties(phpClass).any { it.name == propertyName }) {
-            result.putIfAbsent(targetKey(attributesMethod, PropertyKind.ATTRIBUTE.name), MagicPropertyTarget(attributesMethod, PropertyKind.ATTRIBUTE))
+        return propertyNames.distinct().map { propertyName ->
+            MagicProperty(
+                name = propertyName,
+                type = null,
+                kind = PropertyKind.ATTRIBUTE,
+                source = attributesMethod,
+            )
         }
     }
 
     private fun isRelationMethod(method: Method): Boolean {
-        val text = method.text
-        return Regex("\\breturn\\b[\\s\\S]*?\\b(hasOne|hasMany)\\s*\\(")
-            .containsMatchIn(text)
+        return method.children.any(::isHasOneOrHasManyCall)
+    }
+
+    private fun isHasOneOrHasManyCall(element: PsiElement): Boolean {
+        if (element is PhpReference) {
+            val name = element.name
+            if (name == "hasOne" || name == "hasMany") {
+                return true
+            }
+        }
+        return element.children.any(::isHasOneOrHasManyCall)
     }
 
     private fun extractRelationType(method: Method): PhpType? {
-        val text = method.text
-        val classReferenceMatch = Regex("\\b(?:hasOne|hasMany)\\s*\\(\\s*([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)::class")
-            .find(text)
-        if (classReferenceMatch != null) {
-            return buildPhpTypeFromFqn(normalizeFqn(classReferenceMatch.groupValues[1]) ?: return method.type)
+        val relationCall = findRelationCall(method) ?: return method.type
+        val firstArgText = relationCall.parent?.text.orEmpty()
+        if (firstArgText.contains("::class")) {
+            val className = firstArgText.substringAfter("(").substringBefore("::class").trim()
+            normalizeFqn(className)?.let(::buildPhpTypeFromFqn)?.let { return it }
         }
-
-        val stringReferenceMatch = Regex("\\b(?:hasOne|hasMany)\\s*\\(\\s*['\"]([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)['\"]")
-            .find(text)
-        if (stringReferenceMatch != null) {
-            return buildPhpTypeFromFqn(normalizeFqn(stringReferenceMatch.groupValues[1]) ?: return method.type)
-        }
-
         return method.type
+    }
+
+    private fun findRelationCall(method: Method): PhpReference? {
+        val visitor = RelationCallVisitor()
+        method.accept(visitor)
+        return visitor.found
+    }
+
+    private class RelationCallVisitor : com.intellij.psi.PsiRecursiveElementVisitor() {
+        var found: PhpReference? = null
+
+        override fun visitElement(element: PsiElement) {
+            if (found != null) {
+                return
+            }
+            if (element is PhpReference) {
+                val name = element.name
+                if (name == "hasOne" || name == "hasMany") {
+                    found = element
+                    return
+                }
+            }
+            super.visitElement(element)
+        }
     }
 
     private fun getSetterParameterType(method: Method): PhpType? {
         val firstParam = method.parameters.firstOrNull() ?: return null
-        if (!firstParam.declaredType.isEmpty) {
-            return firstParam.declaredType
+        val typeHint = firstParam.declaredType
+        if (!typeHint.isEmpty) {
+            return typeHint
         }
 
         val docComment = method.docComment?.text ?: return null
-        return Regex("@param\\s+([^\\s]+)").find(docComment)?.groupValues?.getOrNull(1)?.let(::buildPhpType)
-    }
-
-    private fun accessorToPropertyNames(methodName: String, prefix: String): List<String> {
-        val base = methodName.removePrefix(prefix)
-        if (base.isBlank()) {
-            return emptyList()
+        val paramPattern = Regex("@param\\s+([^\\s]+)")
+        paramPattern.find(docComment)?.let { match ->
+            return buildPhpType(match.groupValues[1].trim())
         }
 
-        val lcFirst = base.replaceFirstChar { it.lowercaseChar() }
-        val snakeCase = camelToSnake(base).replaceFirstChar { it.lowercaseChar() }
-
-        return linkedSetOf(lcFirst, snakeCase)
-            .filter { it.isNotBlank() }
+        return null
     }
 
-    private fun buildAccessorNames(prefix: String, propertyName: String): List<String> {
-        val normalized = propertyName.trim()
-        if (normalized.isBlank()) {
-            return emptyList()
+    private fun accessorToPropertyName(accessorName: String, prefix: String): String {
+        val base = accessorName.removePrefix(prefix)
+        if (base.isEmpty()) {
+            return accessorName
         }
 
-        val direct = prefix + normalized.replaceFirstChar { it.uppercaseChar() }
-        val camelized = prefix + snakeToPascal(normalized)
+        val tokens = splitPropertyTokens(base)
+        if (tokens.isEmpty()) {
+            return base.replaceFirstChar(Char::lowercaseChar)
+        }
 
-        return linkedSetOf(camelized, direct)
-            .filter { it.length > prefix.length }
+        return tokens.first().lowercase() + tokens.drop(1).joinToString("") {
+            it.lowercase().replaceFirstChar(Char::uppercaseChar)
+        }
     }
 
-    private fun snakeToPascal(name: String): String {
-        return name.split('_')
-            .filter { it.isNotBlank() }
-            .joinToString("") { part ->
-                part.replaceFirstChar { it.uppercaseChar() }
+
+    private fun getGetterReturnType(method: Method): PhpType? {
+        val declaredType = method.declaredType
+        if (!declaredType.isEmpty) {
+            return declaredType
+        }
+
+        val docComment = method.docComment?.text
+        if (!docComment.isNullOrBlank()) {
+            Regex("""@return\s+([^\s]+)""").find(docComment)?.let { match ->
+                buildPhpType(match.groupValues[1].trim())?.let { return it }
             }
+        }
+
+        val methodType = method.type
+        if (!methodType.isEmpty && methodType.types.all { !it.contains('#') }) {
+            return methodType
+        }
+
+        return null
     }
 
-    private fun camelToSnake(name: String): String {
-        return name.replace(Regex("(?<!^)([A-Z])"), "_$1")
+    private fun preferredDisplayName(selected: MagicProperty, variants: List<MagicProperty>): String {
+        if (selected.kind == PropertyKind.GETTER || selected.kind == PropertyKind.SETTER || selected.kind == PropertyKind.RELATION) {
+            return selected.name
+        }
+
+        return variants.firstOrNull { !it.name.contains('_') }?.name ?: selected.name
+    }
+
+    private fun normalizedPropertyIdentity(name: String): String {
+        val tokens = splitPropertyTokens(name)
+        return if (tokens.isEmpty()) name.lowercase() else tokens.joinToString("_") { it.lowercase() }
+    }
+
+    private fun propertyNameVariants(propertyName: String): List<String> {
+        val tokens = splitPropertyTokens(propertyName)
+        if (tokens.isEmpty()) {
+            return listOf(propertyName)
+        }
+
+        val lowerSnake = tokens.joinToString("_") { it.lowercase() }
+        val lowerCamel = tokens.first().lowercase() + tokens.drop(1).joinToString("") { it.lowercase().replaceFirstChar(Char::uppercaseChar) }
+        val legacy = tokens.joinToString("_") { token ->
+            if (token.length == 1) token.uppercase() else token.replaceFirstChar(Char::uppercaseChar).lowercase().replaceFirstChar(Char::uppercaseChar)
+        }
+        val pascal = tokens.joinToString("") { it.lowercase().replaceFirstChar(Char::uppercaseChar) }
+
+        return listOf(propertyName, lowerSnake, lowerCamel, legacy, pascal).distinct()
+    }
+
+    private fun splitPropertyTokens(name: String): List<String> {
+        return name
+            .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
+            .replace(Regex("([A-Z]+)([A-Z][a-z])"), "$1_$2")
+            .split("_")
+            .filter { it.isNotBlank() }
     }
 
     private fun buildPhpType(rawType: String?): PhpType? {
         val normalized = rawType
             ?.trim()
-            ?.substringBefore('|')
+            ?.substringBefore("|")
             ?.removeSuffix("[]")
             ?.takeIf { it.isNotBlank() }
             ?: return null
-
-        return PhpType().add(normalizeFqnOrPrimitive(normalized))
+        return PhpType().add(normalized)
     }
 
-    private fun buildPhpTypeFromFqn(fqn: String): PhpType {
-        return PhpType().add(fqn)
-    }
+    private fun buildPhpTypeFromFqn(fqn: String): PhpType = PhpType().add(fqn)
 
-    private fun normalizeFqnOrPrimitive(name: String): String {
-        return if (name.startsWith("\\") || name.lowercase() in primitiveTypes) {
-            name
-        } else {
-            "\\$name"
-        }
-    }
+    private fun isPublic(field: Field): Boolean = field.modifier.isPublic
+
+    private fun isPublic(method: Method): Boolean = method.modifier.isPublic
 
     private fun normalizeFqn(name: String): String? {
         if (name.isBlank()) {
@@ -427,40 +503,51 @@ class MagicPropertyResolver {
         return if (name.startsWith("\\")) name else "\\$name"
     }
 
-    private fun targetKey(element: PsiElement, suffix: String = ""): String {
-        return buildString {
-            append(element.containingFile?.virtualFile?.path ?: "")
-            append(':')
-            append(element.textOffset)
-            append(':')
-            append(suffix)
-        }
+    private fun variantKey(property: MagicProperty): String {
+        return "${property.kind}:${property.source.textOffset}:${property.name}"
     }
 
-    private val primitiveTypes = setOf(
-        "int", "integer", "float", "double", "string", "bool", "boolean", "array", "mixed", "callable", "iterable", "object", "self", "static", "void"
-    )
+    private fun resolutionTieBreaker(kind: PropertyKind): Int = when (kind) {
+        PropertyKind.GETTER -> 10
+        PropertyKind.RELATION -> 20
+        PropertyKind.SETTER -> 30
+        PropertyKind.FIELD -> 40
+        PropertyKind.ATTRIBUTE -> 50
+        PropertyKind.PHPDOC -> 60
+        PropertyKind.PHPDOC_READ -> 70
+        PropertyKind.PHPDOC_WRITE -> 80
+    }
+
+    private fun navigationTieBreaker(kind: PropertyKind): Int = when (kind) {
+        PropertyKind.GETTER -> 10
+        PropertyKind.RELATION -> 20
+        PropertyKind.SETTER -> 30
+        PropertyKind.FIELD -> 40
+        PropertyKind.ATTRIBUTE -> 50
+        PropertyKind.PHPDOC -> 60
+        PropertyKind.PHPDOC_READ -> 70
+        PropertyKind.PHPDOC_WRITE -> 80
+    }
+
+    private fun sourceOrder(source: PsiElement): Int = source.textOffset
+
+    private fun PropertyKind.isPhpDoc(): Boolean = this == PropertyKind.PHPDOC || this == PropertyKind.PHPDOC_READ || this == PropertyKind.PHPDOC_WRITE
 }
 
 data class MagicProperty(
     val name: String,
     val type: PhpType?,
     val kind: PropertyKind,
-    val source: PsiElement
+    val source: PsiElement,
 )
 
-data class MagicPropertyTarget(
-    val element: PsiElement,
-    val kind: PropertyKind
-)
-
-enum class PropertyKind(val priority: Int) {
-    FIELD(10),
-    PHPDOC(20),
-    PHPDOC_READ(21),
-    PHPDOC_WRITE(21),
-    GETTER(30),
-    SETTER(40),
-    RELATION(50),
-    ATTRIBUTE(60)
+enum class PropertyKind {
+    FIELD,
+    PHPDOC,
+    PHPDOC_READ,
+    PHPDOC_WRITE,
+    GETTER,
+    SETTER,
+    RELATION,
+    ATTRIBUTE,
 }

@@ -1,3 +1,5 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+import org.jetbrains.intellij.platform.gradle.models.ProductRelease
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -20,32 +22,48 @@ dependencies {
     intellijPlatform {
         phpstorm("2026.1")
         bundledPlugin("com.jetbrains.php")
+        pluginVerifier()
     }
-    
-    // Test dependencies - use IntelliJ Platform test framework
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.0")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.0")
-    testImplementation("org.junit.platform:junit-platform-launcher:1.10.0")
+
+    testImplementation(kotlin("test"))
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.2")
 }
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
+        languageVersion.set(JavaLanguageVersion.of(21))
     }
 }
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
+        jvmTarget.set(JvmTarget.JVM_21)
+    }
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild.set("261")
+            untilBuild.set("261.*")
+        }
+    }
+
+    pluginVerification {
+        ides {
+            select {
+                types = listOf(IntelliJPlatformType.PhpStorm)
+                channels = listOf(ProductRelease.Channel.RELEASE)
+                sinceBuild = "251"
+                untilBuild = "251.*"
+            }
+        }
     }
 }
 
 tasks {
-    patchPluginXml {
-        sinceBuild.set("241")  // PhpStorm 2024.1+
-        untilBuild.set("")     // No upper limit
-    }
-
     buildSearchableOptions {
         enabled = false
     }
@@ -60,5 +78,9 @@ tasks {
 
     test {
         useJUnitPlatform()
+        systemProperty("java.system.class.loader", "com.intellij.util.lang.PathClassLoader")
+        exclude("**/*PluginTest*")
+        exclude("**/*PlatformTest*")
+        exclude("**/*IntellijTest*")
     }
 }

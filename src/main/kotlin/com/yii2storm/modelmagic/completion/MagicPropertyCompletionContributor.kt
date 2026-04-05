@@ -6,18 +6,18 @@ import com.intellij.codeInsight.completion.CompletionProvider
 import com.intellij.codeInsight.completion.CompletionResultSet
 import com.intellij.codeInsight.completion.CompletionType
 import com.intellij.codeInsight.lookup.LookupElementBuilder
+import com.intellij.icons.AllIcons
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.util.ProcessingContext
 import com.jetbrains.php.lang.psi.elements.FieldReference
+import com.yii2storm.modelmagic.resolver.MagicProperty
 import com.yii2storm.modelmagic.resolver.MagicPropertyResolver
 import com.yii2storm.modelmagic.resolver.PropertyKind
 import com.yii2storm.modelmagic.util.MagicPropertyPsiUtil
-import com.intellij.icons.AllIcons
 
 class MagicPropertyCompletionContributor : CompletionContributor() {
 
     init {
-        // Completion for $model->property
         extend(
             CompletionType.BASIC,
             PlatformPatterns.psiElement().withParent(FieldReference::class.java),
@@ -25,65 +25,123 @@ class MagicPropertyCompletionContributor : CompletionContributor() {
                 override fun addCompletions(
                     parameters: CompletionParameters,
                     context: ProcessingContext,
-                    result: CompletionResultSet
+                    result: CompletionResultSet,
                 ) {
                     val fieldReference = parameters.position.parent as? FieldReference ?: return
                     addPropertyCompletions(fieldReference, result)
                 }
-            }
+            },
         )
     }
 
     private fun addPropertyCompletions(
         fieldReference: FieldReference,
-        result: CompletionResultSet
+        result: CompletionResultSet,
     ) {
         val project = fieldReference.project
         val resolver = MagicPropertyResolver.getInstance(project)
-
         val modelClasses = MagicPropertyPsiUtil.resolveModelClasses(project, fieldReference)
-        if (modelClasses.isEmpty()) return
+        if (modelClasses.isEmpty()) {
+            return
+        }
 
         val added = linkedSetOf<String>()
 
         modelClasses.forEach { phpClass ->
             resolver.getModelProperties(phpClass).forEach { property ->
                 if (added.add(property.name)) {
-                    val lookupElement = createLookupElement(property)
-                    result.addElement(lookupElement)
+                    result.addElement(createLookupElement(property))
                 }
             }
         }
     }
 
-    private fun createLookupElement(property: com.yii2storm.modelmagic.resolver.MagicProperty): LookupElementBuilder {
-        val icon = getIconForKind(property.kind)
-        val typeText = property.type?.toString() ?: ""
-        val tailText = getKindTailText(property.kind)
-
-        return LookupElementBuilder
+    private fun createLookupElement(property: MagicProperty): LookupElementBuilder {
+        val typeText = readableTypeText(property.type)
+        val builder = LookupElementBuilder
             .create(property.name)
-            .withIcon(icon)
-            .withTypeText(typeText, true)
-            .withTailText(tailText, true)
+            .withIcon(iconForKind(property.kind))
+            .withTailText(tailTextForKind(property.kind), true)
+
+        return if (typeText.isBlank()) {
+            builder
+        } else {
+            builder.withTypeText(typeText, true)
+        }
     }
 
-    private fun getIconForKind(kind: PropertyKind): javax.swing.Icon = when (kind) {
-        PropertyKind.RELATION -> AllIcons.Nodes.Method // Relation method
-        PropertyKind.GETTER -> AllIcons.Nodes.Method // Getter method
-        PropertyKind.SETTER -> AllIcons.Nodes.Method // Setter method
-        PropertyKind.FIELD -> AllIcons.Nodes.Field // Public field
-        PropertyKind.PHPDOC -> AllIcons.Nodes.Property // PHPDoc property
-        PropertyKind.PHPDOC_READ -> AllIcons.Nodes.Property // Read-only property
-        PropertyKind.PHPDOC_WRITE -> AllIcons.Nodes.Property // Write-only property
-        PropertyKind.ATTRIBUTE -> AllIcons.Nodes.Parameter // Attribute/column
+    private fun readableTypeText(type: com.jetbrains.php.lang.psi.resolve.types.PhpType?): String {
+        if (type == null || type.isEmpty) {
+            return ""
+        }
+
+        val primitiveTypes = linkedSetOf<String>()
+        val classTypes = linkedSetOf<String>()
+
+        type.types.forEach { raw ->
+            when (val normalized = normalizeTypePart(raw)) {
+                null -> Unit
+                "int", "string", "bool", "float", "array", "mixed", "object", "callable", "iterable", "void", "null", "false", "true" -> {
+                    primitiveTypes.add(normalized)
+                }
+                else -> classTypes.add(normalized)
+            }
+        }
+
+        val result = (primitiveTypes + classTypes).toList()
+        return result.joinToString("|")
     }
 
-    private fun getKindTailText(kind: PropertyKind): String = when (kind) {
+    private fun normalizeTypePart(raw: String): String? {
+        val part = raw.trim()
+        if (part.isBlank()) {
+            return null
+        }
+
+        val directPrimitive = when (part) {
+            "int", "string", "bool", "float", "array", "mixed", "object", "callable", "iterable", "void", "null", "false", "true" -> part
+            else -> null
+        }
+        if (directPrimitive != null) {
+            return directPrimitive
+        }
+
+        if (part.endsWith("[]")) {
+            val base = normalizeTypePart(part.removeSuffix("[]")) ?: return "array"
+            return "$base[]"
+        }
+
+        if (part.contains("#C\\")) {
+            return part.substringAfter("#C\\").substringAfterLast("\\").takeIf { it.isNotBlank() }
+        }
+
+        if (part.startsWith("\\")) {
+            return part.substringAfterLast("\\").takeIf { it.isNotBlank() }
+        }
+
+        if (part.contains("\\") && !part.contains("#")) {
+            return part.substringAfterLast("\\").takeIf { it.isNotBlank() }
+        }
+
+        return null
+    }
+
+    private fun iconForKind(kind: PropertyKind) = when (kind) {
+        PropertyKind.RELATION -> AllIcons.Nodes.Method
+        PropertyKind.GETTER -> AllIcons.Nodes.Method
+        PropertyKind.SETTER -> AllIcons.Nodes.Method
+        PropertyKind.FIELD -> AllIcons.Nodes.Field
+        PropertyKind.PHPDOC,
+        PropertyKind.PHPDOC_READ,
+        PropertyKind.PHPDOC_WRITE -> AllIcons.Nodes.Property
+        PropertyKind.ATTRIBUTE -> AllIcons.Nodes.Parameter
+    }
+
+    private fun tailTextForKind(kind: PropertyKind): String = when (kind) {
         PropertyKind.RELATION -> " (relation)"
         PropertyKind.GETTER -> " (getter)"
         PropertyKind.SETTER -> " (setter)"
-        PropertyKind.FIELD -> " (field)"
+        PropertyKind.FIELD -> ""
         PropertyKind.PHPDOC -> " (@property)"
         PropertyKind.PHPDOC_READ -> " (@property-read)"
         PropertyKind.PHPDOC_WRITE -> " (@property-write)"

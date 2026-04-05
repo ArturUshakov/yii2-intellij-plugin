@@ -13,6 +13,8 @@ help:
 	@echo "  make lint       - Run code checks"
 	@echo ""
 
+init: clean lint build test package
+
 # Build the project
 build:
 	./gradlew build
